@@ -1,6 +1,5 @@
 const admin = require('firebase-admin');
 
-// Ініціалізація Firebase Admin через змінні оточення (щоб не світити ключі)
 if (!admin.apps.length) {
     admin.initializeApp({
         credential: admin.credential.cert({
@@ -22,31 +21,57 @@ export default async function handler(req, res) {
     if (!message || !message.text) return res.status(200).send('OK');
 
     const chatId = message.chat.id;
-    const text = message.text; // Буде мати вигляд "/start aB1c2D3eF4..."
+    const text = message.text;
 
     if (text.startsWith('/start ')) {
-        const userId = text.split(' ')[1]; // Дістали UID з посилання!
-
+        const userId = text.split(' ')[1];
         try {
-            // Записуємо tgChatId в документ юзера
-            await db.collection('users').doc(userId).set({
-                tgChatId: chatId
-            }, { merge: true });
-
-            // Відправляємо успішну відповідь у Телеграм
+            await db.collection('users').doc(userId).set({ tgChatId: chatId }, { merge: true });
             await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
                     chat_id: chatId,
-                    text: "🎉 *Вітаю!* Твій Telegram успішно підв'язано до навчальної платформи.\n\nТепер ти миттєво дізнаватимешся про нові домашні завдання.",
-                    parse_mode: "Markdown"
+                    text: "🎉 *Вітаю!* Твій Telegram успішно підв'язано.\n\nТепер ти можеш перевіряти свій абонемент кнопкою нижче.",
+                    parse_mode: "Markdown",
+                    reply_markup: {
+                        keyboard: [[{ text: "Мій абонемент 💳" }]],
+                        resize_keyboard: true
+                    }
                 })
             });
+        } catch (error) {}
+    }
 
-        } catch (error) {
-            console.error(error);
-        }
+    if (text === '/subscription' || text === 'Мій абонемент 💳') {
+        try {
+            const usersSnap = await db.collection("users").where("tgChatId", "==", chatId).get();
+            if (usersSnap.empty) {
+                await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ chat_id: chatId, text: "❌ Акаунт не підв'язано. Перейди в особистий кабінет на сайті." })
+                });
+                return res.status(200).send("OK");
+            }
+            const userData = usersSnap.docs[0].data();
+            const sub = userData.subscription;
+            if (!sub) {
+                await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ chat_id: chatId, text: "📋 Твій абонемент ще не заповнений вчителем." })
+                });
+                return res.status(200).send("OK");
+            }
+            const left = (sub.paid || 0) - (sub.attended || 0);
+            const responseText = `💳 *ТВІЙ АБОНЕМЕНТ* 💳\n\n👤 *Учень:* ${userData.name || userData.email || 'Не вказано'}\n📊 *Статус занять:*\n▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬\n🍏 Проплачено: \`${sub.paid || 0}\`\n👟 Відвідано: \`${sub.attended || 0}\`\n🔥 Залишилось: \`${left >= 0 ? left : 0}\` занять\n▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬\n📅 *Наступна оплата до:* ${sub.nextPayment || 'не встановлено'}`;
+            await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ chat_id: chatId, text: responseText, parse_mode: "Markdown" })
+            });
+        } catch (e) {}
     }
 
     return res.status(200).send('OK');
