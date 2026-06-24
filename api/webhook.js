@@ -44,35 +44,28 @@ export default async function handler(req, res) {
     }
 
     if (text === '/subscription' || text === 'Мій абонемент 💳') {
+        console.log("Отримано команду абонемента для чату:", chatId); // ЛОГ 1
         try {
             const usersSnap = await db.collection("users").where("tgChatId", "==", chatId).get();
+            
             if (usersSnap.empty) {
-                await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ chat_id: chatId, text: "❌ Акаунт не підв'язано. Перейди в особистий кабінет на сайті." })
-                });
+                console.log("Користувача з таким tgChatId не знайдено"); // ЛОГ 2
+                // ... відправка повідомлення про непідв'язаний акаунт ...
                 return res.status(200).send("OK");
             }
+            
             const userData = usersSnap.docs[0].data();
+            console.log("Знайдено користувача:", userData.email); // ЛОГ 3
+            
             const sub = userData.subscription;
             if (!sub) {
-                await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ chat_id: chatId, text: "📋 Твій абонемент ще не заповнений вчителем." })
-                });
-                return res.status(200).send("OK");
+                console.log("У користувача немає поля subscription"); // ЛОГ 4
+                // ...
             }
-            const left = (sub.paid || 0) - (sub.attended || 0);
-            const responseText = `💳 *ТВІЙ АБОНЕМЕНТ* 💳\n\n👤 *Учень:* ${userData.name || userData.email || 'Не вказано'}\n📊 *Статус занять:*\n▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬\n🍏 Проплачено: \`${sub.paid || 0}\`\n👟 Відвідано: \`${sub.attended || 0}\`\n🔥 Залишилось: \`${left >= 0 ? left : 0}\` занять\n▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬\n📅 *Наступна оплата до:* ${sub.nextPayment || 'не встановлено'}`;
-            await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ chat_id: chatId, text: responseText, parse_mode: "Markdown" })
-            });
-        } catch (e) {}
+            // ... решта коду
+        } catch (e) {
+            console.error("Помилка в обробнику:", e); // ЛОГ 5
+        }
     }
-
     return res.status(200).send('OK');
 }
