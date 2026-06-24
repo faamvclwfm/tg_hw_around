@@ -23,10 +23,13 @@ export default async function handler(req, res) {
     const chatId = message.chat.id;
     const text = message.text;
 
+    // 1. Обробка команди /start
     if (text.startsWith('/start ')) {
         const userId = text.split(' ')[1];
         try {
             await db.collection('users').doc(userId).set({ tgChatId: chatId }, { merge: true });
+            
+            // Відправка повідомлення з кнопкою
             await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -36,36 +39,66 @@ export default async function handler(req, res) {
                     parse_mode: "Markdown",
                     reply_markup: {
                         keyboard: [[{ text: "Мій абонемент 💳" }]],
-                        resize_keyboard: true
+                        resize_keyboard: true,
+                        one_time_keyboard: false
                     }
                 })
             });
-        } catch (error) {}
+        } catch (e) {
+            console.error("Помилка при старті:", e);
+        }
+        return res.status(200).send("OK");
     }
 
+    // 2. Обробка команди абонемента
     if (text === '/subscription' || text === 'Мій абонемент 💳') {
-        console.log("Отримано команду абонемента для чату:", chatId); // ЛОГ 1
         try {
-            const usersSnap = await db.collection("users").where("tgChatId", "==", chatId).get();
-            
+            const usersSnap = await db.collection('users').where('tgChatId', '==', chatId).get();
+
             if (usersSnap.empty) {
-                console.log("Користувача з таким tgChatId не знайдено"); // ЛОГ 2
-                // ... відправка повідомлення про непідв'язаний акаунт ...
+                await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        chat_id: chatId, 
+                        text: "❌ Акаунт не підв'язано. Спробуй ще раз перейти за посиланням з особистого кабінету." 
+                    })
+                });
                 return res.status(200).send("OK");
             }
-            
+
             const userData = usersSnap.docs[0].data();
-            console.log("Знайдено користувача:", userData.email); // ЛОГ 3
-            
             const sub = userData.subscription;
+            
             if (!sub) {
-                console.log("У користувача немає поля subscription"); // ЛОГ 4
-                // ...
+                await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        chat_id: chatId, 
+                        text: "📋 Твій абонемент ще не заповнений вчителем." 
+                    })
+                });
+                return res.status(200).send("OK");
             }
-            // ... решта коду
-        } catch (e) {
-            console.error("Помилка в обробнику:", e); // ЛОГ 5
+
+            const left = (sub.paid || 0) - (sub.attended || 0);
+            const responseText = `💳 *ТВІЙ АБОНЕМЕНТ* 💳\n\n👤 *Учень:* ${userData.name || 'Учень'}\n📊 *Статус занять:*\n▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬\n🍏 Проплачено: \`${sub.paid || 0}\`\n👟 Відвідано: \`${sub.attended || 0}\`\n🔥 Залишилось: \`${left >= 0 ? left : 0}\` занять\n▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬\n📅 *Наступна оплата до:* ${sub.nextPayment || 'не встановлено'}`;
+
+            await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ 
+                    chat_id: chatId, 
+                    text: responseText,
+                    parse_mode: 'Markdown'
+                })
+            });
+        } catch (error) {
+            console.error("Помилка запиту абонемента:", error);
         }
+        return res.status(200).send("OK");
     }
-    return res.status(200).send('OK');
+
+    return res.status(200).send("OK");
 }
