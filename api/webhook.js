@@ -1,4 +1,4 @@
-const admin = require('firebase-admin');
+import admin from 'firebase-admin';
 
 if (!admin.apps.length) {
     admin.initializeApp({
@@ -12,104 +12,120 @@ if (!admin.apps.length) {
 
 const db = admin.firestore();
 
-// ✅ FIX 1: module.exports замість "export default" (CommonJS vs ESM конфлікт)
-module.exports = async function handler(req, res) {
+async function sendTelegramMessage(chatId, text, extra = {}) {
+    const res = await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ chat_id: chatId, text, ...extra })
+    });
+    if (!res.ok) {
+        const err = await res.json();
+        console.error('[Telegram API Error]', JSON.stringify(err));
+    }
+    return res;
+}
+
+export default async function handler(req, res) {
+    // Vercel іноді шле GET для health-check
     if (req.method !== 'POST') return res.status(200).send('OK');
 
-    const update = req.body;
+    let update;
+    try {
+        // Якщо body вже розпарсений Vercel — беремо як є, інакше парсимо вручну
+        update = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+    } catch (e) {
+        console.error('[Parse Error]', e);
+        return res.status(200).send('OK');
+    }
+
+    if (!update) {
+        console.error('[No body]');
+        return res.status(200).send('OK');
+    }
+
     let chatId;
     let text = "";
 
     if (update.message && update.message.text) {
-        // ✅ FIX 2: chatId як String — Firestore зберігає як Number, а порівнює як Number
         chatId = update.message.chat.id;
         text = update.message.text.trim();
     } else if (update.callback_query && update.callback_query.data) {
         chatId = update.callback_query.message.chat.id;
         text = update.callback_query.data.trim();
     } else {
+        console.log('[Webhook] Update без тексту:', JSON.stringify(update));
         return res.status(200).send('OK');
     }
 
+    console.log(`[Webhook] chatId=${chatId} text="${text}"`);
+
+    // ─── /start ───────────────────────────────────────────────────
     if (text.startsWith('/start')) {
         const parts = text.split(' ');
         if (parts.length > 1) {
             const userId = parts[1];
             try {
-                // ✅ FIX 3: зберігаємо tgChatId як Number (тип має відповідати тому, що приходить від Telegram)
-                await db.collection('users').doc(userId).set({ tgChatId: Number(chatId) }, { merge: true });
+                // Зберігаємо як Number — саме такого типу chatId від Telegram
+                await db.collection('users').doc(userId).set(
+                    { tgChatId: Number(chatId) },
+                    { merge: true }
+                );
+                console.log(`[/start] tgChatId=${chatId} збережено для userId=${userId}`);
             } catch (e) {
-                console.error('[/start] Помилка запису в Firestore:', e);
+                console.error('[/start] Firestore error:', e);
             }
         }
 
-        try {
-            const tgRes = await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    chat_id: chatId,
-                    text: "🎉 *Вітаю!* Твій Telegram успішно підв'язано.\n\nТепер ти можеш перевіряти свій абонемент кнопкою нижче.",
-                    parse_mode: "Markdown",
-                    reply_markup: {
-                        keyboard: [[{ text: "Мій абонемент 💳" }]],
-                        resize_keyboard: true,
-                        one_time_keyboard: false
-                    }
-                })
-            });
-            // ✅ FIX 4: логуємо відповідь Telegram щоб бачити помилки
-            if (!tgRes.ok) {
-                const err = await tgRes.json();
-                console.error('[/start] Telegram sendMessage error:', JSON.stringify(err));
+        await sendTelegramMessage(
+            chatId,
+            "🎉 *Вітаю!* Твій Telegram успішно підв'язано.\n\nТепер ти можеш перевіряти свій абонемент кнопкою нижче.",
+            {
+                parse_mode: "Markdown",
+                reply_markup: {
+                    keyboard: [[{ text: "Мій абонемент 💳" }]],
+                    resize_keyboard: true,
+                    one_time_keyboard: false
+                }
             }
-        } catch (e) {
-            console.error('[/start] fetch error:', e);
-        }
+        );
         return res.status(200).send("OK");
     }
 
-    // ✅ FIX 5: "Мій абонемент 💳" — текст кнопки містить емодзі, перевірка була без нього
-    if (
-        text === '/subscription' ||
+    // ─── /subscription або кнопка "Мій абонемент 💳" ──────────────
+    const isSubscriptionRequest =
         text.startsWith('/subscription') ||
-        text.includes('Мій абонемент') ||
-        text.includes('абонемент')
-    ) {
-        try {
-            // ✅ FIX 6: порівнюємо і як Number, і як String на випадок розбіжності типів у Firestore
-            let usersSnap = await db.collection('users').where('tgChatId', '==', Number(chatId)).get();
+        text.includes('абонемент') ||
+        text.includes('Абонемент');
 
-            // Fallback: якщо раптом збережений як рядок
+    if (isSubscriptionRequest) {
+        try {
+            // Шукаємо спочатку як Number (стандарт), потім як String (fallback)
+            let usersSnap = await db.collection('users')
+                .where('tgChatId', '==', Number(chatId))
+                .get();
+
             if (usersSnap.empty) {
-                usersSnap = await db.collection('users').where('tgChatId', '==', String(chatId)).get();
+                console.warn(`[subscription] Не знайдено за Number(${chatId}), пробую String...`);
+                usersSnap = await db.collection('users')
+                    .where('tgChatId', '==', String(chatId))
+                    .get();
             }
 
             if (usersSnap.empty) {
-                console.warn(`[subscription] Користувача з chatId=${chatId} не знайдено в Firestore`);
-                await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        chat_id: chatId,
-                        text: "❌ Акаунт не підв'язано. Спробуй ще раз перейти за посиланням з особистого кабінету."
-                    })
-                });
+                console.warn(`[subscription] Користувача chatId=${chatId} не знайдено взагалі`);
+                await sendTelegramMessage(chatId,
+                    "❌ Акаунт не підв'язано. Перейди за посиланням з особистого кабінету та натисни /start."
+                );
                 return res.status(200).send("OK");
             }
 
             const userData = usersSnap.docs[0].data();
+            console.log(`[subscription] Знайдено користувача: ${userData.email || userData.name}`);
+
             const sub = userData.subscription;
 
             if (!sub) {
-                await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        chat_id: chatId,
-                        text: "📋 Твій абонемент ще не заповнений вчителем."
-                    })
-                });
+                await sendTelegramMessage(chatId, "📋 Твій абонемент ще не заповнений вчителем.");
                 return res.status(200).send("OK");
             }
 
@@ -125,27 +141,13 @@ module.exports = async function handler(req, res) {
                 `▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬\n` +
                 `📅 *Наступна оплата до:* ${sub.nextPayment || 'не встановлено'}`;
 
-            const tgRes = await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    chat_id: chatId,
-                    text: responseText,
-                    parse_mode: 'Markdown'
-                })
-            });
-
-            // ✅ FIX 4 (продовження): логуємо помилки Telegram
-            if (!tgRes.ok) {
-                const err = await tgRes.json();
-                console.error('[subscription] Telegram sendMessage error:', JSON.stringify(err));
-            }
+            await sendTelegramMessage(chatId, responseText, { parse_mode: 'Markdown' });
 
         } catch (error) {
-            console.error('[subscription] Внутрішня помилка:', error);
+            console.error('[subscription] Помилка:', error);
         }
         return res.status(200).send("OK");
     }
 
     return res.status(200).send("OK");
-};
+}
