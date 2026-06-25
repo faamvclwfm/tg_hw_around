@@ -16,20 +16,31 @@ export default async function handler(req, res) {
     if (req.method !== 'POST') return res.status(200).send('OK');
 
     const update = req.body;
-    const message = update.message;
+    let chatId;
+    let text = "";
 
-    if (!message || !message.text) return res.status(200).send('OK');
+    if (update.message && update.message.text) {
+        chatId = update.message.chat.id;
+        text = update.message.text.trim();
+    } else if (update.callback_query && update.callback_query.data) {
+        chatId = update.callback_query.message.chat.id;
+        text = update.callback_query.data.trim();
+    } else {
+        return res.status(200).send('OK');
+    }
 
-    const chatId = message.chat.id;
-    const text = message.text;
-
-    // 1. Обробка команди /start
-    if (text.startsWith('/start ')) {
-        const userId = text.split(' ')[1];
+    if (text.startsWith('/start')) {
+        const parts = text.split(' ');
+        if (parts.length > 1) {
+            const userId = parts[1];
+            try {
+                await db.collection('users').doc(userId).set({ tgChatId: chatId }, { merge: true });
+            } catch (e) {
+                console.error(e);
+            }
+        }
+        
         try {
-            await db.collection('users').doc(userId).set({ tgChatId: chatId }, { merge: true });
-            
-            // Відправка повідомлення з кнопкою
             await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -45,13 +56,12 @@ export default async function handler(req, res) {
                 })
             });
         } catch (e) {
-            console.error("Помилка при старті:", e);
+            console.error(e);
         }
         return res.status(200).send("OK");
     }
 
-    // 2. Обробка команди абонемента
-    if (text === '/subscription' || text === 'Мій абонемент 💳') {
+    if (text.includes('/subscription') || text.includes('Мій абонемент') || text.includes('Абонемент')) {
         try {
             const usersSnap = await db.collection('users').where('tgChatId', '==', chatId).get();
 
@@ -83,7 +93,7 @@ export default async function handler(req, res) {
             }
 
             const left = (sub.paid || 0) - (sub.attended || 0);
-            const responseText = `💳 *ТВІЙ АБОНЕМЕНТ* 💳\n\n👤 *Учень:* ${userData.name || 'Учень'}\n📊 *Статус занять:*\n▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬\n🍏 Проплачено: \`${sub.paid || 0}\`\n👟 Відвідано: \`${sub.attended || 0}\`\n🔥 Залишилось: \`${left >= 0 ? left : 0}\` занять\n▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬\n📅 *Наступна оплата до:* ${sub.nextPayment || 'не встановлено'}`;
+            const responseText = `💳 *ТВІЙ АБОНЕМЕНТ* 💳\n\n👤 *Учень:* ${userData.name || userData.email || 'Не вказано'}\n📊 *Статус занять:*\n▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬\n🍏 Проплачено: \`${sub.paid || 0}\`\n👟 Відвідано: \`${sub.attended || 0}\`\n🔥 Залишилось: \`${left >= 0 ? left : 0}\` занять\n▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬ ▬\n📅 *Наступна оплата до:* ${sub.nextPayment || 'не встановлено'}`;
 
             await fetch(`https://api.telegram.org/bot${process.env.BOT_TOKEN}/sendMessage`, {
                 method: 'POST',
@@ -95,7 +105,7 @@ export default async function handler(req, res) {
                 })
             });
         } catch (error) {
-            console.error("Помилка запиту абонемента:", error);
+            console.error(error);
         }
         return res.status(200).send("OK");
     }
