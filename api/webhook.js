@@ -12,233 +12,314 @@ if (!admin.apps.length) {
 
 const db = admin.firestore();
 const BOT_TOKEN = process.env.BOT_TOKEN;
-
-// ===== ВИПРАВЛЕННЯ 1: MarkdownV2 замість Markdown =====
-// Markdown (v1) не підтримує ~закреслення~ та має баги з екрануванням.
-// MarkdownV2 — актуальний стандарт Telegram.
-// Спецсимволи _ * [ ] ( ) ~ ` > # + - = | { } . ! потрібно екранувати.
-function escapeMarkdown(text) {
-    if (!text) return '';
-    return String(text).replace(/[_*[\]()~`>#+\-=|{}.!]/g, '\\$&');
-}
+const CABINET_URL = 'https://diagnostictestresults-9f6ac.web.app/';
 
 async function tgSend(chatId, text, extra = {}) {
     const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            chat_id: chatId,
-            text,
-            parse_mode: 'MarkdownV2', // ВИПРАВЛЕНО: було 'Markdown'
-            ...extra,
-        }),
+        body: JSON.stringify({ chat_id: chatId, text, ...extra }),
     });
     const result = await r.json();
     if (!result.ok) console.error('[TG] Error:', JSON.stringify(result));
     return result;
 }
 
-// ===== ВИПРАВЛЕННЯ 2: Реєстрація chatId при /start =====
-// Без збереження tgChatId у Firestore юзер ніколи не отримає нагадувань.
-async function handleStart(chatId, from) {
-    try {
-        const userId = String(from.id);
+async function findUserByChatId(chatId) {
+    const snap = await db.collection('users')
+        .where('tgChatId', '==', String(chatId))
+        .limit(1)
+        .get();
+    if (snap.empty) return null;
+    const doc = snap.docs[0];
+    const userData = { uid: doc.id, ...doc.data() };
 
-        // Зберігаємо/оновлюємо tgChatId в колекції users
-        await db.collection('users').doc(userId).set(
-            {
-                tgChatId: chatId,
-                tgUsername: from.username || null,
-                tgFirstName: from.first_name || null,
-                updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-            },
-            { merge: true } // merge: true — не перезаписуємо решту полів
+    if (!userData.groupId) {
+        const groupSnap = await db.collection('groups')
+            .where('members', 'array-contains', doc.id)
+            .limit(1)
+            .get();
+        if (!groupSnap.empty) {
+            userData.groupId = groupSnap.docs[0].id;
+            await db.collection('users').doc(doc.id).set({ groupId: userData.groupId }, { merge: true });
+        }
+    }
+
+    return userData;
+}
+
+async function getNextLessons(groupId, count = 5) {
+    const groupDoc = await db.collection('groups').doc(groupId).get();
+    if (!groupDoc.exists) return [];
+
+    const schedule = groupDoc.data().schedule || {};
+    const recurring = schedule.recurring || [];
+    const exceptions = schedule.exceptions || {};
+
+    const lessons = [];
+    const today = new Date();
+
+    for (let i = 0; i < 30 && lessons.length < count; i++) {
+        const date = new Date(today);
+        date.setDate(today.getDate() + i);
+
+        let dow = date.getDay();
+        if (dow === 0) dow = 7;
+
+        const dateStr = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, '0')}-${String(date.getDate()).padStart(2, '0')}`;
+        const exception = exceptions[dateStr];
+
+        if (exception) {
+            if (exception.status === 'cancelled' || exception.status === 'rescheduled') continue;
+            if (['scheduled', 'conducted', 'milestone'].includes(exception.status)) {
+                lessons.push({ dateStr, time: exception.time || '—', status: exception.status });
+                continue;
+            }
+        }
+
+        const rec = recurring.find(r => r.day === dow);
+        if (rec) {
+            lessons.push({ dateStr, time: rec.time || '—', status: 'scheduled' });
+        }
+    }
+
+    return lessons;
+}
+
+async function getActiveHomeworks(groupId, userId) {
+    const snap = await db.collection('assignments')
+        .where('groupId', '==', groupId)
+        .get();
+
+    if (snap.empty) return [];
+
+    const completedSnap = await db.collection('completed_homeworks')
+        .where('groupId', '==', groupId)
+        .where('userId', '==', userId)
+        .get();
+
+    const submittedIds = new Set();
+    completedSnap.forEach(d => submittedIds.add(d.data().assignmentId));
+
+    const active = [];
+    snap.forEach(d => {
+        if (!submittedIds.has(d.id)) {
+            active.push({ id: d.id, ...d.data() });
+        }
+    });
+
+    active.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+    return active.slice(0, 5);
+}
+
+async function getProgress(userId) {
+    const snap = await db.collection('completed_tasks')
+        .where('userId', '==', userId)
+        .get();
+
+    let totalScore = 0;
+    let totalMax = 0;
+    let count = 0;
+
+    snap.forEach(d => {
+        const data = d.data();
+        totalScore += Number(data.score || 0);
+        totalMax   += Number(data.maxScore || 0);
+        count++;
+    });
+
+    const percent = totalMax > 0 ? Math.round((totalScore / totalMax) * 100) : 0;
+    return { count, percent };
+}
+
+function formatDate(dateStr) {
+    const months = ['січня','лютого','березня','квітня','травня','червня','липня','серпня','вересня','жовтня','листопада','грудня'];
+    const [y, m, d] = dateStr.split('-');
+    return `${parseInt(d)} ${months[parseInt(m) - 1]}`;
+}
+
+const MAIN_KEYBOARD = {
+    keyboard: [
+        [{ text: 'Мій абонемент 💳' }, { text: 'Домашні завдання 📚' }],
+        [{ text: 'Розклад 📅' },        { text: 'Мій прогрес 📊' }],
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+};
+
+async function handleUpdate(update) {
+    let chatId, text = '';
+
+    if (update?.message?.text) {
+        chatId = update.message.chat.id;
+        text = update.message.text.trim();
+    } else if (update?.callback_query?.data) {
+        chatId = update.callback_query.message.chat.id;
+        text = update.callback_query.data.trim();
+    } else {
+        return;
+    }
+
+    console.log(`[Webhook] chatId=${chatId} text="${text}"`);
+
+    if (text.startsWith('/start')) {
+        const userId = text.split(' ')[1];
+        if (userId) {
+            await db.collection('users').doc(userId).set(
+                { tgChatId: String(chatId) },
+                { merge: true }
+            );
+        }
+
+        await tgSend(chatId,
+            "🎉 *Вітаю!* Твій Telegram успішно підв'язано.\n\nОбирай що тебе цікавить 👇",
+            { parse_mode: 'Markdown', reply_markup: MAIN_KEYBOARD }
         );
+        return;
+    }
 
-        const name = escapeMarkdown(from.first_name || 'Учню');
-        await tgSend(
-            chatId,
-            `👋 Привіт, *${name}*\\!\n\nЯ твій навчальний бот\\-асистент\\. Тут ти отримуватимеш нагадування про заняття та домашні завдання\\.\n\n📌 Доступні команди:\n/start \\— перезапустити бота\n/help \\— допомога`
+    const t = text.toLowerCase();
+    const isAbonement = t.includes('абонемент') || text.startsWith('/subscription');
+    const isHomework  = t.includes('домашн')    || text.startsWith('/homework');
+    const isSchedule  = t.includes('розклад')   || text.startsWith('/schedule');
+    const isProgress  = t.includes('прогрес')   || text.startsWith('/progress');
+
+    if (!isAbonement && !isHomework && !isSchedule && !isProgress) {
+        await tgSend(chatId, 'Обирай що тебе цікавить 👇', { reply_markup: MAIN_KEYBOARD });
+        return;
+    }
+
+    const userData = await findUserByChatId(chatId);
+
+    if (!userData) {
+        await tgSend(chatId,
+            "❌ Акаунт не підв'язано.\n\nПерейди в особистий кабінет і натисни кнопку підключення Telegram.",
+            { reply_markup: MAIN_KEYBOARD }
         );
-    } catch (e) {
-        console.error('[handleStart Error]', e);
+        return;
     }
-}
 
-// ===== ВИПРАВЛЕННЯ 3: Обробка /help та невідомих команд =====
-async function handleHelp(chatId) {
-    await tgSend(
-        chatId,
-        `ℹ️ *Довідка*\n\n/start \\— реєстрація та привітання\n/help \\— ця довідка\n\nНагадування про заняття та ДЗ надходять автоматично напередодні ввечері\\.`
-    );
-}
-
-async function handleUnknown(chatId, text) {
-    const safe = escapeMarkdown(text);
-    await tgSend(
-        chatId,
-        `🤷 Не розумію команду: \`${safe}\`\n\nСпробуй /help для списку доступних команд\\.`
-    );
-}
-
-/**
- * 1. Сповіщення про зміну розкладу
- */
-async function sendScheduleChangeNotification(groupId, dateStr, oldTime, newTime, changeType) {
-    try {
-        const groupDoc = await db.collection('groups').doc(groupId).get();
-        if (!groupDoc.exists) return;
-
-        const groupData = groupDoc.data();
-        const students = groupData.students || [];
-        const groupName = escapeMarkdown(groupData.name || 'Твоя група');
-        const safeDateStr = escapeMarkdown(dateStr);
-        const safeOldTime = escapeMarkdown(oldTime || 'не вказано');
-        const safeNewTime = escapeMarkdown(newTime);
-
-        for (const studentId of students) {
-            const userDoc = await db.collection('users').doc(studentId).get();
-            const chatId = userDoc.data()?.tgChatId;
-            if (!chatId) continue;
-
-            let message = '';
-
-            if (changeType === 'time_change') {
-                message = `⏰ *Зміна часу заняття\\!*\n\nЗаняття з предмета "${groupName}" на *${safeDateStr}* змінено\\.\n🕒 Старий час: ~${safeOldTime}~\n🟢 Новий час: *${safeNewTime}*`;
-            } else if (changeType === 'rescheduled') {
-                message = `📅 *Перенесення заняття\\!*\n\nЗаняття з предмета "${groupName}" перенесено на іншу дату\\.\n🗓 Нова дата: *${safeDateStr}*\n🕒 Час проведення: *${safeNewTime}*`;
-            } else if (changeType === 'cancelled') {
-                message = `❌ *Заняття скасовано\\!*\n\nЗаняття з предмета "${groupName}" на *${safeDateStr}* було скасовано\\.`;
-            }
-
-            if (message) {
-                await tgSend(chatId, message);
-            }
+    if (isAbonement) {
+        const sub = userData.subscription;
+        if (!sub) {
+            await tgSend(chatId, '📋 Абонемент ще не заповнений вчителем.', { reply_markup: MAIN_KEYBOARD });
+            return;
         }
-    } catch (e) {
-        console.error('[Schedule Notification Error]', e);
+
+        const name     = userData.name || userData.email || 'Учень';
+        const paid     = Number(sub.paid     || 0);
+        const attended = Number(sub.attended || 0);
+        const left     = Math.max(0, paid - attended);
+        const next     = sub.nextPayment || 'не вказано';
+        const warning  = left === 0 ? '\n\n⚠️ *Поповни абонемент!*' : left <= 2 ? `\n\n⚡ Залишилось лише ${left} — скоро поповнити.` : '';
+
+        await tgSend(chatId,
+            `💳 *АБОНЕМЕНТ*\n\n👤 ${name}\n` +
+            `▬▬▬▬▬▬▬▬▬▬\n` +
+            `🍏 Оплачено:   \`${paid}\`\n` +
+            `👟 Відвідано:  \`${attended}\`\n` +
+            `🔥 Залишилось: \`${left}\`\n` +
+            `▬▬▬▬▬▬▬▬▬▬\n` +
+            `📅 Наступна оплата: *${next}*` + warning,
+            { parse_mode: 'Markdown', reply_markup: MAIN_KEYBOARD }
+        );
+        return;
+    }
+
+    const groupId = userData.groupId;
+
+    if (isHomework) {
+        if (!groupId) {
+            await tgSend(chatId, '📭 Тебе ще не додано до жодного класу.', { reply_markup: MAIN_KEYBOARD });
+            return;
+        }
+
+        const hws = await getActiveHomeworks(groupId, userData.uid);
+
+        if (hws.length === 0) {
+            await tgSend(chatId, '✅ Активних домашніх завдань немає. Так тримати!', { reply_markup: MAIN_KEYBOARD });
+            return;
+        }
+
+        const lines = hws.map((hw, i) => {
+            const count = (hw.requiredTests || []).length;
+            return `${i + 1}. 📌 *${hw.title || 'Без назви'}*\n    Тестів: ${count}`;
+        });
+
+        await tgSend(chatId,
+            `📚 *Активні домашні завдання:*\n\n${lines.join('\n\n')}\n\n👉 [Перейти в кабінет](${CABINET_URL})`,
+            { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: MAIN_KEYBOARD }
+        );
+        return;
+    }
+
+    if (isSchedule) {
+        if (!groupId) {
+            await tgSend(chatId, '📭 Тебе ще не додано до жодного класу.', { reply_markup: MAIN_KEYBOARD });
+            return;
+        }
+
+        const lessons = await getNextLessons(groupId);
+
+        if (lessons.length === 0) {
+            await tgSend(chatId, '📅 Найближчих занять не знайдено.', { reply_markup: MAIN_KEYBOARD });
+            return;
+        }
+
+        const emoji = { scheduled: '📍', conducted: '✅', milestone: '🚩' };
+        const lines = lessons.map(l => `${emoji[l.status] || '📍'} *${formatDate(l.dateStr)}* — ${l.time}`);
+
+        await tgSend(chatId,
+            `📅 *Найближчі заняття:*\n\n${lines.join('\n')}`,
+            { parse_mode: 'Markdown', reply_markup: MAIN_KEYBOARD }
+        );
+        return;
+    }
+
+    if (isProgress) {
+        const { count, percent } = await getProgress(userData.uid);
+        const bar     = Math.round(percent / 10);
+        const filled  = '🟩'.repeat(bar);
+        const empty   = '⬜'.repeat(10 - bar);
+        const comment = percent >= 80 ? '🔥 Чудовий результат!' : percent >= 50 ? '💪 Непогано, є куди рости!' : '📈 Практикуйся більше!';
+
+        await tgSend(chatId,
+            `📊 *Мій прогрес*\n\n` +
+            `Тестів пройдено: *${count}*\n` +
+            `Середній результат: *${percent}%*\n\n` +
+            `${filled}${empty}\n\n` +
+            `${comment}\n\n` +
+            `👉 [Детально в кабінеті](${CABINET_URL})`,
+            { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: MAIN_KEYBOARD }
+        );
+        return;
     }
 }
 
-/**
- * 2. Вечірні нагадування про ДЗ (Cron Job о 17:30)
- */
-async function sendEveningReminders() {
-    try {
-        const tomorrow = new Date();
-        tomorrow.setDate(tomorrow.getDate() + 1);
-        const tomorrowStr = tomorrow.toISOString().split('T')[0];
-
-        const groupsSnap = await db.collection('groups').get();
-
-        for (const groupDoc of groupsSnap.docs) {
-            const groupData = groupDoc.data();
-            const schedule = groupData.schedule || {};
-            const tomorrowLesson = schedule[tomorrowStr];
-
-            if (
-                tomorrowLesson &&
-                (tomorrowLesson.status === 'scheduled' || tomorrowLesson.status === 'rescheduled')
-            ) {
-                const students = groupData.students || [];
-                const groupName = escapeMarkdown(groupData.name || 'Твоя група');
-                const safeDate = escapeMarkdown(tomorrowStr);
-                const safeTime = escapeMarkdown(tomorrowLesson.time);
-
-                for (const studentId of students) {
-                    const userDoc = await db.collection('users').doc(studentId).get();
-                    const chatId = userDoc.data()?.tgChatId;
-
-                    if (chatId) {
-                        const msg = `🔔 *Нагадування про ДЗ\\!*\n\nЗавтра \\(*${safeDate}*\\) о *${safeTime}* у тебе відбудеться заняття з предмета "${groupName}"\\.\n\n📚 Не забудь виконати та здати домашнє завдання у своєму особистому кабінеті\\!`;
-                        await tgSend(chatId, msg);
-                    }
-                }
-            }
-        }
-    } catch (e) {
-        console.error('[Evening Reminders Error]', e);
-    }
-}
-
-/**
- * ГОЛОВНИЙ ОБРОБНИК ВЕБХУКУ
- */
-export default async function handler(req, res) {
-    // GET — для Cron Job
-    if (req.method === 'GET') {
-        const action = req.query?.action;
-        if (action === 'evening_reminders') {
-            await sendEveningReminders();
-            return res.status(200).send('Reminders processed');
-        }
-        return res.status(200).send('OK');
-    }
-
+module.exports = async function handler(req, res) {
     if (req.method !== 'POST') {
-        return res.status(200).send('OK');
+        res.status(200).send('OK');
+        return;
     }
 
-    const action = req.query?.action || req.body?.action;
-
-    // POST від адмінки (зміна розкладу)
-    if (action === 'schedule_change') {
-        const { groupId, dateStr, oldTime, newTime, changeType } = req.body;
-        if (groupId && dateStr) {
-            await sendScheduleChangeNotification(groupId, dateStr, oldTime, newTime, changeType);
-        }
-        return res.status(200).send('Notification processed');
-    }
-
-    // POST від Telegram
     let update;
     try {
         update = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     } catch (e) {
         console.error('[Parse Error]', e.message);
-        return res.status(200).send('OK');
+        res.status(200).send('OK');
+        return;
     }
 
     try {
-        if (update?.message) {
-            const chatId = update.message.chat.id;
-            const from = update.message.from || {};
-            const text = (update.message.text || '').trim();
-
-            // ===== ВИПРАВЛЕННЯ 3: Розширений обробник команд =====
-            if (text === '/start') {
-                await handleStart(chatId, from);
-            } else if (text === '/help') {
-                await handleHelp(chatId);
-            } else if (text.startsWith('/')) {
-                // Невідома команда — підказуємо юзеру
-                await handleUnknown(chatId, text);
-            } else {
-                // Довільне текстове повідомлення (не команда)
-                // Тут можна додати логіку або просто ігнорувати
-                // await tgSend(chatId, 'Напиши /help для списку команд\\.');
-            }
-        }
-
-        // Обробка натискань на inline-кнопки (callback_query)
-        if (update?.callback_query) {
-            const callbackQuery = update.callback_query;
-            const chatId = callbackQuery.message?.chat?.id;
-            const data = callbackQuery.data;
-
-            // Підтвердження отримання callback (обов'язково!)
-            await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/answerCallbackQuery`, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ callback_query_id: callbackQuery.id }),
-            });
-
-            // TODO: обробляй data тут залежно від твоїх кнопок
-            console.log('[Callback]', data, 'from chat', chatId);
-        }
+        await handleUpdate(update);
     } catch (e) {
         console.error('[Handler Error]', e.message, e.stack);
+        const chatId = update?.message?.chat?.id || update?.callback_query?.message?.chat?.id;
+        if (chatId) {
+            try { await tgSend(chatId, '⚠️ Сталася помилка. Спробуй ще раз.', { reply_markup: MAIN_KEYBOARD }); } catch (_) {}
+        }
     }
 
-    return res.status(200).send('OK');
-}
+    res.status(200).send('OK');
+};
