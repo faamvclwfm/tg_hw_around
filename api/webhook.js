@@ -13,6 +13,7 @@ if (!admin.apps.length) {
 const db = admin.firestore();
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CABINET_URL = 'https://diagnostictestresults-9f6ac.web.app/';
+const ADMIN_CHAT_IDS = (process.env.ADMIN_CHAT_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 
 async function tgSend(chatId, text, extra = {}) {
     const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
@@ -23,6 +24,10 @@ async function tgSend(chatId, text, extra = {}) {
     const result = await r.json();
     if (!result.ok) console.error('[TG] Error:', JSON.stringify(result));
     return result;
+}
+
+function isAdmin(chatId) {
+    return ADMIN_CHAT_IDS.includes(String(chatId));
 }
 
 async function findUserByChatId(chatId) {
@@ -123,9 +128,13 @@ async function getProgress(userId) {
 
     snap.forEach(d => {
         const data = d.data();
-        totalScore += Number(data.score || 0);
-        totalMax   += Number(data.maxScore || 0);
-        count++;
+        const score = Number(data.score ?? data.testResult ?? 0);
+        const max = Number(data.maxScore ?? data.testQuestionsQuantity ?? 0);
+        if (max > 0) {
+            totalScore += score;
+            totalMax   += max;
+            count++;
+        }
     });
 
     const percent = totalMax > 0 ? Math.round((totalScore / totalMax) * 100) : 0;
@@ -146,6 +155,129 @@ const MAIN_KEYBOARD = {
     resize_keyboard: true,
     one_time_keyboard: false,
 };
+
+const ADMIN_KEYBOARD = {
+    keyboard: [
+        [{ text: '👥 Групи та учні' }, { text: '📋 ДЗ по групах' }],
+        [{ text: '📊 Загальна статистика' }, { text: '🔔 Розіслати нагадування' }],
+    ],
+    resize_keyboard: true,
+    one_time_keyboard: false,
+};
+
+async function handleAdminUpdate(chatId, text) {
+    const t = text.toLowerCase();
+
+    if (text === '👥 Групи та учні' || t.includes('/groups')) {
+        const snap = await db.collection('groups').orderBy('createdAt', 'desc').get();
+        if (snap.empty) {
+            await tgSend(chatId, '📭 Груп ще немає.', { reply_markup: ADMIN_KEYBOARD });
+            return;
+        }
+        const lines = [];
+        snap.forEach(doc => {
+            const d = doc.data();
+            const count = (d.members || []).length;
+            lines.push(`📂 *${d.groupName}*\n   Учнів: ${count}`);
+        });
+        await tgSend(chatId,
+            `👥 *Список груп:*\n\n${lines.join('\n\n')}`,
+            { parse_mode: 'Markdown', reply_markup: ADMIN_KEYBOARD }
+        );
+        return;
+    }
+
+    if (text === '📋 ДЗ по групах' || t.includes('/assignments')) {
+        const groupsSnap = await db.collection('groups').get();
+        if (groupsSnap.empty) {
+            await tgSend(chatId, '📭 Груп ще немає.', { reply_markup: ADMIN_KEYBOARD });
+            return;
+        }
+
+        const lines = [];
+        for (const groupDoc of groupsSnap.docs) {
+            const groupName = groupDoc.data().groupName;
+            const aSnap = await db.collection('assignments').where('groupId', '==', groupDoc.id).get();
+            const hwLines = [];
+            aSnap.forEach(d => {
+                const data = d.data();
+                const reqCount = (data.requiredTests || []).length;
+                hwLines.push(`  • ${data.title || 'Без назви'} — ${reqCount} тестів`);
+            });
+            if (hwLines.length > 0) {
+                lines.push(`📂 *${groupName}:*\n${hwLines.join('\n')}`);
+            } else {
+                lines.push(`📂 *${groupName}:* немає ДЗ`);
+            }
+        }
+
+        await tgSend(chatId,
+            `📋 *Домашні завдання по групах:*\n\n${lines.join('\n\n')}`,
+            { parse_mode: 'Markdown', reply_markup: ADMIN_KEYBOARD }
+        );
+        return;
+    }
+
+    if (text === '📊 Загальна статистика' || t.includes('/stats')) {
+        const usersSnap = await db.collection('users').get();
+        const groupsSnap = await db.collection('groups').get();
+        const assignSnap = await db.collection('assignments').get();
+        const completedSnap = await db.collection('completed_homeworks').get();
+
+        const usersCount = usersSnap.size;
+        const groupsCount = groupsSnap.size;
+        const hwCount = assignSnap.size;
+        const submittedCount = completedSnap.size;
+
+        await tgSend(chatId,
+            `📊 *Загальна статистика:*\n\n` +
+            `👤 Учнів: *${usersCount}*\n` +
+            `📂 Груп: *${groupsCount}*\n` +
+            `📋 ДЗ призначено: *${hwCount}*\n` +
+            `✅ ДЗ здано: *${submittedCount}*\n\n` +
+            `👉 [Відкрити адмінку](${CABINET_URL}groups.html)`,
+            { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: ADMIN_KEYBOARD }
+        );
+        return;
+    }
+
+    if (text === '🔔 Розіслати нагадування' || t.includes('/remind')) {
+        await tgSend(chatId,
+            `🔔 Надішліть повідомлення у форматі:\n\n` +
+            `/broadcast Текст нагадування для всіх учнів`,
+            { reply_markup: ADMIN_KEYBOARD }
+        );
+        return;
+    }
+
+    if (text.startsWith('/broadcast ')) {
+        const msg = text.slice('/broadcast '.length).trim();
+        if (!msg) {
+            await tgSend(chatId, '❌ Текст повідомлення порожній.', { reply_markup: ADMIN_KEYBOARD });
+            return;
+        }
+
+        const usersSnap = await db.collection('users').get();
+        let sent = 0;
+        const promises = [];
+        usersSnap.forEach(doc => {
+            const data = doc.data();
+            if (data.tgChatId && String(data.tgChatId) !== String(chatId)) {
+                promises.push(
+                    tgSend(data.tgChatId, `📢 *Повідомлення від вчителя:*\n\n${msg}`, { parse_mode: 'Markdown' })
+                        .then(() => sent++)
+                        .catch(() => {})
+                );
+            }
+        });
+        await Promise.all(promises);
+
+        await tgSend(chatId, `✅ Надіслано *${sent}* учням.`, { parse_mode: 'Markdown', reply_markup: ADMIN_KEYBOARD });
+        return;
+    }
+
+    await tgSend(chatId, 'Оберіть дію 👇', { reply_markup: ADMIN_KEYBOARD });
+}
 
 async function handleUpdate(update) {
     let chatId, text = '';
@@ -171,10 +303,22 @@ async function handleUpdate(update) {
             );
         }
 
-        await tgSend(chatId,
-            "🎉 *Вітаю!* Твій Telegram успішно підв'язано.\n\nОбирай що тебе цікавить 👇",
-            { parse_mode: 'Markdown', reply_markup: MAIN_KEYBOARD }
-        );
+        if (isAdmin(chatId)) {
+            await tgSend(chatId,
+                "🔐 *Вітаю, адміне!* Ти у панелі керування.\n\nОбирай дію 👇",
+                { parse_mode: 'Markdown', reply_markup: ADMIN_KEYBOARD }
+            );
+        } else {
+            await tgSend(chatId,
+                "🎉 *Вітаю!* Твій Telegram успішно підв'язано.\n\nОбирай що тебе цікавить 👇",
+                { parse_mode: 'Markdown', reply_markup: MAIN_KEYBOARD }
+            );
+        }
+        return;
+    }
+
+    if (isAdmin(chatId)) {
+        await handleAdminUpdate(chatId, text);
         return;
     }
 
@@ -296,8 +440,158 @@ async function handleUpdate(update) {
     }
 }
 
+async function sendEveningReminders() {
+    try {
+        const groupsSnap = await db.collection('groups').get();
+
+        for (const groupDoc of groupsSnap.docs) {
+            const groupData = groupDoc.data();
+            const schedule = groupData.schedule || {};
+            const recurring = schedule.recurring || [];
+            const exceptions = schedule.exceptions || {};
+            const members = groupData.members || [];
+
+            if (members.length === 0) continue;
+
+            const tomorrow = new Date();
+            tomorrow.setDate(tomorrow.getDate() + 1);
+
+            let dow = tomorrow.getDay();
+            if (dow === 0) dow = 7;
+
+            const dateStr = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
+            const exception = exceptions[dateStr];
+
+            let lessonTime = null;
+
+            if (exception) {
+                if (exception.status === 'cancelled' || exception.status === 'rescheduled') continue;
+                if (['scheduled', 'conducted', 'milestone'].includes(exception.status)) {
+                    lessonTime = exception.time || '—';
+                }
+            } else {
+                const rec = recurring.find(r => r.day === dow);
+                if (rec) lessonTime = rec.time || '—';
+            }
+
+            if (!lessonTime) continue;
+
+            const usersSnap = await db.collection('users')
+                .where(admin.firestore.FieldPath.documentId(), 'in', members.slice(0, 10))
+                .get();
+
+            const activeHws = await db.collection('assignments').where('groupId', '==', groupDoc.id).get();
+            const completedSnap = await db.collection('completed_homeworks').where('groupId', '==', groupDoc.id).get();
+            const submittedIds = new Set();
+            completedSnap.forEach(d => submittedIds.add(d.data().assignmentId));
+
+            const pendingHws = [];
+            activeHws.forEach(d => {
+                if (!submittedIds.has(d.id)) {
+                    pendingHws.push(d.data().title || 'Без назви');
+                }
+            });
+
+            const hwBlock = pendingHws.length > 0
+                ? `\n\n📚 *Незавершені ДЗ:*\n${pendingHws.slice(0, 3).map(h => `  • ${h}`).join('\n')}`
+                : '\n\n✅ Усі домашні завдання виконано!';
+
+            const promises = [];
+            usersSnap.forEach(doc => {
+                const data = doc.data();
+                if (data.tgChatId) {
+                    promises.push(
+                        tgSend(data.tgChatId,
+                            `🌙 *Нагадування на завтра*\n\n` +
+                            `📅 Завтра заняття о *${lessonTime}*\n` +
+                            `📂 Група: *${groupData.groupName}*` +
+                            hwBlock +
+                            `\n\n👉 [Відкрити кабінет](${CABINET_URL})`,
+                            { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: MAIN_KEYBOARD }
+                        ).catch(() => {})
+                    );
+                }
+            });
+            await Promise.all(promises);
+        }
+    } catch (e) {
+        console.error('[EveningReminder Error]', e.message);
+    }
+}
+
+async function sendScheduleChangeNotification(groupId, dateStr, oldTime, newTime, changeType) {
+    try {
+        const groupDoc = await db.collection('groups').doc(groupId).get();
+        if (!groupDoc.exists) return;
+        const groupData = groupDoc.data();
+        const members = groupData.members || [];
+        if (members.length === 0) return;
+
+        const formatUkrDate = (dStr) => {
+            const months = ['січня','лютого','березня','квітня','травня','червня','липня','серпня','вересня','жовтня','листопада','грудня'];
+            const [y, m, d] = dStr.split('-');
+            return `${parseInt(d)} ${months[parseInt(m) - 1]} ${y}`;
+        };
+
+        let msgText = '';
+        if (changeType === 'cancelled') {
+            msgText = `❌ *Заняття скасовано*\n\n📅 Дата: *${formatUkrDate(dateStr)}*\n📂 Група: *${groupData.groupName}*`;
+        } else if (changeType === 'rescheduled') {
+            msgText = `🔄 *Заняття перенесено*\n\n📅 Стара дата: *${formatUkrDate(dateStr)}*\n🆕 Нова дата: *${formatUkrDate(newTime)}*\n📂 Група: *${groupData.groupName}*`;
+        } else if (changeType === 'time_changed') {
+            msgText = `⏰ *Змінено час заняття*\n\n📅 Дата: *${formatUkrDate(dateStr)}*\n🕐 Новий час: *${newTime}*\n📂 Група: *${groupData.groupName}*`;
+        } else {
+            msgText = `📅 *Оновлення розкладу*\n\n📅 Дата: *${formatUkrDate(dateStr)}*\n📂 Група: *${groupData.groupName}*`;
+        }
+
+        for (let i = 0; i < members.length; i += 10) {
+            const chunk = members.slice(i, i + 10);
+            const usersSnap = await db.collection('users')
+                .where(admin.firestore.FieldPath.documentId(), 'in', chunk)
+                .get();
+
+            const promises = [];
+            usersSnap.forEach(doc => {
+                const data = doc.data();
+                if (data.tgChatId) {
+                    promises.push(
+                        tgSend(data.tgChatId, msgText, {
+                            parse_mode: 'Markdown',
+                            reply_markup: MAIN_KEYBOARD
+                        }).catch(() => {})
+                    );
+                }
+            });
+            await Promise.all(promises);
+        }
+    } catch (e) {
+        console.error('[ScheduleNotify Error]', e.message);
+    }
+}
+
 module.exports = async function handler(req, res) {
+    if (req.method === 'GET') {
+        const action = req.query?.action;
+        if (action === 'evening_reminders') {
+            await sendEveningReminders();
+            res.status(200).send('OK');
+            return;
+        }
+        res.status(200).send('OK');
+        return;
+    }
+
     if (req.method !== 'POST') {
+        res.status(200).send('OK');
+        return;
+    }
+
+    const action = req.query?.action || req.body?.action;
+    if (action === 'schedule_change') {
+        const { groupId, dateStr, oldTime, newTime, changeType } = req.body;
+        if (groupId && dateStr) {
+            await sendScheduleChangeNotification(groupId, dateStr, oldTime, newTime, changeType);
+        }
         res.status(200).send('OK');
         return;
     }
@@ -323,3 +617,5 @@ module.exports = async function handler(req, res) {
 
     res.status(200).send('OK');
 };
+
+module.exports.sendScheduleChangeNotification = sendScheduleChangeNotification;
