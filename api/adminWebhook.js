@@ -1,4 +1,3 @@
-
 const admin = require('firebase-admin');
 
 if (!admin.apps.length) {
@@ -23,7 +22,6 @@ async function tgSend(chatId, text, extra = {}) {
         body: JSON.stringify({ chat_id: chatId, text, ...extra }),
     });
     const result = await r.json();
-    if (!result.ok) console.error('[AdminTG] Error:', JSON.stringify(result));
     return result;
 }
 
@@ -102,16 +100,10 @@ async function handleSummary(chatId) {
         const completedSnap = await db.collection('completed_homeworks').where('groupId', '==', doc.id).get();
         const totalSubmissions = completedSnap.size;
 
-        lines.push(
-            `📁 *${data.groupName}*\n` +
-            `   👥 Учнів: ${membersCount} | 📋 ДЗ: ${totalHw} | ✅ Здач: ${totalSubmissions}`
-        );
+        lines.push(`📁 *${data.groupName}*\n   👥 Учнів: ${membersCount} | 📋 ДЗ: ${totalHw} | ✅ Здач: ${totalSubmissions}`);
     }
 
-    await tgSend(chatId,
-        `📊 *Зведення по групах*\n\n${lines.join('\n\n')}`,
-        { parse_mode: 'Markdown', reply_markup: ADMIN_KEYBOARD }
-    );
+    await tgSend(chatId, `📊 *Зведення по групах*\n\n${lines.join('\n\n')}`, { parse_mode: 'Markdown', reply_markup: ADMIN_KEYBOARD });
 }
 
 async function handleActiveHw(chatId) {
@@ -136,23 +128,14 @@ async function handleActiveHw(chatId) {
         const testsCount = (hw.requiredTests || []).length;
         const completedSnap = await db.collection('completed_homeworks').where('assignmentId', '==', doc.id).get();
 
-        lines.push(
-            `📌 *${hw.title || 'Без назви'}*\n` +
-            `   📁 ${groupCache[groupId]} | 🧪 ${testsCount} тестів | ✅ Здали: ${completedSnap.size}`
-        );
+        lines.push(`📌 *${hw.title || 'Без назви'}*\n   📁 ${groupCache[groupId]} | 🧪 ${testsCount} тестів | ✅ Здали: ${completedSnap.size}`);
     }
 
-    await tgSend(chatId,
-        `📋 *Останні 10 ДЗ:*\n\n${lines.join('\n\n')}\n\n👉 [Адмін-панель](${GROUPS_URL})`,
-        { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: ADMIN_KEYBOARD }
-    );
+    await tgSend(chatId, `📋 *Останні 10 ДЗ:*\n\n${lines.join('\n\n')}\n\n👉 [Адмін-панель](${GROUPS_URL})`, { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: ADMIN_KEYBOARD });
 }
 
 async function handleRecentSubmissions(chatId) {
-    const snap = await db.collection('completed_homeworks')
-        .orderBy('submittedAt', 'desc')
-        .limit(10)
-        .get();
+    const snap = await db.collection('completed_homeworks').orderBy('submittedAt', 'desc').limit(10).get();
 
     if (snap.empty) {
         await tgSend(chatId, '📭 Здач ще немає.', { reply_markup: ADMIN_KEYBOARD });
@@ -172,18 +155,13 @@ async function handleRecentSubmissions(chatId) {
         }
 
         const ts = sub.submittedAt?.seconds
-            ? new Date(sub.submittedAt.seconds * 1000).toLocaleString('uk-UA', {
-                day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Kiev'
-              })
+            ? new Date(sub.submittedAt.seconds * 1000).toLocaleString('uk-UA', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Kiev' })
             : '—';
 
         lines.push(`✅ *${sub.userEmail || 'Учень'}*\n   📌 ${assignCache[assignId]} | 🕐 ${ts}`);
     }
 
-    await tgSend(chatId,
-        `🔔 *Останні 10 здач:*\n\n${lines.join('\n\n')}`,
-        { parse_mode: 'Markdown', reply_markup: ADMIN_KEYBOARD }
-    );
+    await tgSend(chatId, `🔔 *Останні 10 здач:*\n\n${lines.join('\n\n')}`, { parse_mode: 'Markdown', reply_markup: ADMIN_KEYBOARD });
 }
 
 async function handleUpdate(update) {
@@ -195,8 +173,6 @@ async function handleUpdate(update) {
     } else {
         return;
     }
-
-    console.log(`[AdminWebhook] chatId=${chatId} text="${text}"`);
 
     if (text.startsWith('/start')) {
         const secret = text.split(' ')[1];
@@ -211,10 +187,7 @@ async function handleUpdate(update) {
             addedAt: admin.firestore.FieldValue.serverTimestamp()
         }, { merge: true });
 
-        await tgSend(chatId,
-            `👋 *Вітаю, адміне!* Бот підключено.\n\nТи отримуватимеш сповіщення щоразу, коли учень здасть домашнє завдання.\n\nТакож можеш переглядати статистику нижче 👇`,
-            { parse_mode: 'Markdown', reply_markup: ADMIN_KEYBOARD }
-        );
+        await tgSend(chatId, `👋 *Вітаю, адміне!* Бот підключено.\n\nТи отримуватимеш сповіщення щоразу, коли учень здасть домашнє завдання.\n\nТакож можеш переглядати статистику нижче 👇`, { parse_mode: 'Markdown', reply_markup: ADMIN_KEYBOARD });
         return;
     }
 
@@ -243,6 +216,15 @@ async function handleUpdate(update) {
 }
 
 module.exports = async function handler(req, res) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+        res.status(200).end();
+        return;
+    }
+
     if (req.method !== 'POST') {
         res.status(200).send('OK');
         return;
@@ -252,7 +234,6 @@ module.exports = async function handler(req, res) {
     try {
         body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     } catch (e) {
-        console.error('[AdminParse Error]', e.message);
         res.status(200).send('OK');
         return;
     }
@@ -262,18 +243,14 @@ module.exports = async function handler(req, res) {
     if (action === 'hw_submitted') {
         try {
             await handleHwSubmission(body);
-        } catch (e) {
-            console.error('[HwSubmission Error]', e.message, e.stack);
-        }
+        } catch (e) {}
         res.status(200).send('OK');
         return;
     }
 
     try {
         await handleUpdate(body);
-    } catch (e) {
-        console.error('[AdminHandler Error]', e.message, e.stack);
-    }
+    } catch (e) {}
 
     res.status(200).send('OK');
 };

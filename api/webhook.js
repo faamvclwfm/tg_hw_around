@@ -42,24 +42,17 @@ async function tgSend(chatId, text, extra = {}) {
         body: JSON.stringify({ chat_id: chatId, text, ...extra }),
     });
     const result = await r.json();
-    if (!result.ok) console.error('[TG] Error:', JSON.stringify(result));
     return result;
 }
 
 async function findUserByChatId(chatId) {
-    const snap = await db.collection('users')
-        .where('tgChatId', '==', String(chatId))
-        .limit(1)
-        .get();
+    const snap = await db.collection('users').where('tgChatId', '==', String(chatId)).limit(1).get();
     if (snap.empty) return null;
     const doc = snap.docs[0];
     const userData = { uid: doc.id, ...doc.data() };
 
     if (!userData.groupId) {
-        const groupSnap = await db.collection('groups')
-            .where('members', 'array-contains', doc.id)
-            .limit(1)
-            .get();
+        const groupSnap = await db.collection('groups').where('members', 'array-contains', doc.id).limit(1).get();
         if (!groupSnap.empty) {
             userData.groupId = groupSnap.docs[0].id;
             await db.collection('users').doc(doc.id).set({ groupId: userData.groupId }, { merge: true });
@@ -116,16 +109,10 @@ async function getNextLessons(groupId, count = 5) {
 }
 
 async function getActiveHomeworks(groupId, userId) {
-    const snap = await db.collection('assignments')
-        .where('groupId', '==', groupId)
-        .get();
-
+    const snap = await db.collection('assignments').where('groupId', '==', groupId).get();
     if (snap.empty) return [];
 
-    const completedSnap = await db.collection('completed_homeworks')
-        .where('groupId', '==', groupId)
-        .where('userId', '==', userId)
-        .get();
+    const completedSnap = await db.collection('completed_homeworks').where('groupId', '==', groupId).where('userId', '==', userId).get();
 
     const submittedIds = new Set();
     completedSnap.forEach(d => submittedIds.add(d.data().assignmentId));
@@ -154,9 +141,7 @@ async function getProgress(userId) {
 
     for (const batch of batches) {
         const snaps = await Promise.all(
-            batch.map(col =>
-                db.collection(col).where('userId', '==', userId).get().catch(() => null)
-            )
+            batch.map(col => db.collection(col).where('userId', '==', userId).get().catch(() => null))
         );
 
         snaps.forEach(snap => {
@@ -203,9 +188,7 @@ async function handleScheduleChange(payload) {
     const members = groupDoc.data().members || [];
     if (members.length === 0) return;
 
-    const usersSnap = await db.collection('users')
-        .where(admin.firestore.FieldPath.documentId(), 'in', members.slice(0, 10))
-        .get();
+    const usersSnap = await db.collection('users').where(admin.firestore.FieldPath.documentId(), 'in', members.slice(0, 10)).get();
 
     const formattedDate = formatDate(dateStr);
 
@@ -224,22 +207,16 @@ async function handleScheduleChange(payload) {
     usersSnap.forEach(doc => {
         const chatId = doc.data().tgChatId;
         if (chatId) {
-            sends.push(
-                tgSend(chatId, text, { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: MAIN_KEYBOARD })
-            );
+            sends.push(tgSend(chatId, text, { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: MAIN_KEYBOARD }));
         }
     });
 
     if (members.length > 10) {
-        const extraSnap = await db.collection('users')
-            .where(admin.firestore.FieldPath.documentId(), 'in', members.slice(10, 30))
-            .get();
+        const extraSnap = await db.collection('users').where(admin.firestore.FieldPath.documentId(), 'in', members.slice(10, 30)).get();
         extraSnap.forEach(doc => {
             const chatId = doc.data().tgChatId;
             if (chatId) {
-                sends.push(
-                    tgSend(chatId, text, { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: MAIN_KEYBOARD })
-                );
+                sends.push(tgSend(chatId, text, { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: MAIN_KEYBOARD }));
             }
         });
     }
@@ -260,21 +237,13 @@ async function handleUpdate(update) {
         return;
     }
 
-    console.log(`[Webhook] chatId=${chatId} text="${text}"`);
-
     if (text.startsWith('/start')) {
         const userId = text.split(' ')[1];
         if (userId) {
-            await db.collection('users').doc(userId).set(
-                { tgChatId: String(chatId) },
-                { merge: true }
-            );
+            await db.collection('users').doc(userId).set({ tgChatId: String(chatId) }, { merge: true });
         }
 
-        await tgSend(chatId,
-            "🎉 *Вітаю!* Твій Telegram успішно підв'язано.\n\nОбирай що тебе цікавить 👇",
-            { parse_mode: 'Markdown', reply_markup: MAIN_KEYBOARD }
-        );
+        await tgSend(chatId, "🎉 *Вітаю!* Твій Telegram успішно підв'язано.\n\nОбирай що тебе цікавить 👇", { parse_mode: 'Markdown', reply_markup: MAIN_KEYBOARD });
         return;
     }
 
@@ -292,10 +261,7 @@ async function handleUpdate(update) {
     const userData = await findUserByChatId(chatId);
 
     if (!userData) {
-        await tgSend(chatId,
-            "❌ Акаунт не підв'язано.\n\nПерейди в особистий кабінет і натисни кнопку підключення Telegram.",
-            { reply_markup: MAIN_KEYBOARD }
-        );
+        await tgSend(chatId, "❌ Акаунт не підв'язано.\n\nПерейди в особистий кабінет і натисни кнопку підключення Telegram.", { reply_markup: MAIN_KEYBOARD });
         return;
     }
 
@@ -313,16 +279,7 @@ async function handleUpdate(update) {
         const next     = sub.nextPayment || 'не вказано';
         const warning  = left === 0 ? '\n\n⚠️ *Поповни абонемент!*' : left <= 2 ? `\n\n⚡ Залишилось лише ${left} — скоро поповнити.` : '';
 
-        await tgSend(chatId,
-            `💳 *АБОНЕМЕНТ*\n\n👤 ${name}\n` +
-            `▬▬▬▬▬▬▬▬▬▬\n` +
-            `🍏 Оплачено:   \`${paid}\`\n` +
-            `👟 Відвідано:  \`${attended}\`\n` +
-            `🔥 Залишилось: \`${left}\`\n` +
-            `▬▬▬▬▬▬▬▬▬▬\n` +
-            `📅 Наступна оплата: *${next}*` + warning,
-            { parse_mode: 'Markdown', reply_markup: MAIN_KEYBOARD }
-        );
+        await tgSend(chatId, `💳 *АБОНЕМЕНТ*\n\n👤 ${name}\n▬▬▬▬▬▬▬▬▬▬\n🍏 Оплачено:   \`${paid}\`\n👟 Відвідано:  \`${attended}\`\n🔥 Залишилось: \`${left}\`\n▬▬▬▬▬▬▬▬▬▬\n📅 Наступна оплата: *${next}*` + warning, { parse_mode: 'Markdown', reply_markup: MAIN_KEYBOARD });
         return;
     }
 
@@ -346,10 +303,7 @@ async function handleUpdate(update) {
             return `${i + 1}. 📌 *${hw.title || 'Без назви'}*\n    Тестів: ${count}`;
         });
 
-        await tgSend(chatId,
-            `📚 *Активні домашні завдання:*\n\n${lines.join('\n\n')}\n\n👉 [Перейти в кабінет](${CABINET_URL})`,
-            { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: MAIN_KEYBOARD }
-        );
+        await tgSend(chatId, `📚 *Активні домашні завдання:*\n\n${lines.join('\n\n')}\n\n👉 [Перейти в кабінет](${CABINET_URL})`, { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: MAIN_KEYBOARD });
         return;
     }
 
@@ -369,10 +323,7 @@ async function handleUpdate(update) {
         const emoji = { scheduled: '📍', conducted: '✅', milestone: '🚩' };
         const lines = lessons.map(l => `${emoji[l.status] || '📍'} *${formatDate(l.dateStr)}* — ${l.time}`);
 
-        await tgSend(chatId,
-            `📅 *Найближчі заняття:*\n\n${lines.join('\n')}`,
-            { parse_mode: 'Markdown', reply_markup: MAIN_KEYBOARD }
-        );
+        await tgSend(chatId, `📅 *Найближчі заняття:*\n\n${lines.join('\n')}`, { parse_mode: 'Markdown', reply_markup: MAIN_KEYBOARD });
         return;
     }
 
@@ -383,20 +334,21 @@ async function handleUpdate(update) {
         const empty   = '⬜'.repeat(10 - bar);
         const comment = percent >= 80 ? '🔥 Чудовий результат!' : percent >= 50 ? '💪 Непогано, є куди рости!' : '📈 Практикуйся більше!';
 
-        await tgSend(chatId,
-            `📊 *Мій прогрес*\n\n` +
-            `Тестів пройдено: *${count}*\n` +
-            `Середній результат: *${percent}%*\n\n` +
-            `${filled}${empty}\n\n` +
-            `${comment}\n\n` +
-            `👉 [Детально в кабінеті](${CABINET_URL})`,
-            { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: MAIN_KEYBOARD }
-        );
+        await tgSend(chatId, `📊 *Мій прогрес*\n\nТестів пройдено: *${count}*\nСередній результат: *${percent}%*\n\n${filled}${empty}\n\n${comment}\n\n👉 [Детально в кабінеті](${CABINET_URL})`, { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: MAIN_KEYBOARD });
         return;
     }
 }
 
 module.exports = async function handler(req, res) {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+        res.status(200).end();
+        return;
+    }
+
     if (req.method !== 'POST') {
         res.status(200).send('OK');
         return;
@@ -406,7 +358,6 @@ module.exports = async function handler(req, res) {
     try {
         body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     } catch (e) {
-        console.error('[Parse Error]', e.message);
         res.status(200).send('OK');
         return;
     }
@@ -416,9 +367,7 @@ module.exports = async function handler(req, res) {
     if (action === 'schedule_change') {
         try {
             await handleScheduleChange(body);
-        } catch (e) {
-            console.error('[ScheduleChange Error]', e.message, e.stack);
-        }
+        } catch (e) {}
         res.status(200).send('OK');
         return;
     }
@@ -426,7 +375,6 @@ module.exports = async function handler(req, res) {
     try {
         await handleUpdate(body);
     } catch (e) {
-        console.error('[Handler Error]', e.message, e.stack);
         const chatId = body?.message?.chat?.id || body?.callback_query?.message?.chat?.id;
         if (chatId) {
             try { await tgSend(chatId, '⚠️ Сталася помилка. Спробуй ще раз.', { reply_markup: MAIN_KEYBOARD }); } catch (_) {}
