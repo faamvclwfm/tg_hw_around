@@ -14,6 +14,27 @@ const db = admin.firestore();
 const BOT_TOKEN = process.env.BOT_TOKEN;
 const CABINET_URL = 'https://diagnostictestresults-9f6ac.web.app/';
 
+const RESULTS_COLLECTIONS = [
+    'results_mathQuizDiagnosticNEW',
+    'results_test_completed',
+    ...Array.from({ length: 6 },  (_, i) => `results_HOMEWORKTHEME${i + 1}`),
+    ...Array.from({ length: 2 },  (_, i) => `results_HOMEWORKTHEME${i + 9}`),
+    ...Array.from({ length: 92 }, (_, i) => `results_HOMEWORKTHEME${i + 12}`),
+    'results_KLACALKATHEME12',
+    ...Array.from({ length: 4 },  (_, i) => `results_KLACALKATHEME${i + 17}`),
+    ...Array.from({ length: 20 }, (_, i) => `results_LESSON${i + 19}THEME`),
+    'results_SUMMARYTEST1',
+    'results_SUMMARYTEST2',
+    ...Array.from({ length: 7 },  (_, i) => `results_PRACTICE${i + 1}`),
+    ...Array.from({ length: 40 }, (_, i) => `results_ENGLISHWORDSQUIZ${i + 1}`),
+    'results_INTERMEDIATETEST1',
+    'results_INTERMEDIATETEST2',
+    ...Array.from({ length: 5 },  (_, i) => `results_NMTTEST${i + 1}`),
+    ...Array.from({ length: 30 }, (_, i) => `results_HISTORYTEST${i + 1}`),
+    ...Array.from({ length: 40 }, (_, i) => `results_UKRAINIAN${i + 1}`),
+    ...Array.from({ length: 21 }, (_, i) => `results_CHINESE${i + 1}`),
+];
+
 async function tgSend(chatId, text, extra = {}) {
     const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
         method: 'POST',
@@ -70,11 +91,19 @@ async function getNextLessons(groupId, count = 5) {
         const exception = exceptions[dateStr];
 
         if (exception) {
+            if (exception.list && Array.isArray(exception.list)) {
+                const activeLessons = exception.list.filter(l => l.status !== 'cancelled' && l.status !== 'rescheduled');
+                activeLessons.forEach(l => {
+                    lessons.push({ dateStr, time: l.time || '—', status: l.status });
+                });
+                continue;
+            }
             if (exception.status === 'cancelled' || exception.status === 'rescheduled') continue;
             if (['scheduled', 'conducted', 'milestone'].includes(exception.status)) {
                 lessons.push({ dateStr, time: exception.time || '—', status: exception.status });
                 continue;
             }
+            if (exception.status === 'none') continue;
         }
 
         const rec = recurring.find(r => r.day === dow);
@@ -83,7 +112,7 @@ async function getNextLessons(groupId, count = 5) {
         }
     }
 
-    return lessons;
+    return lessons.slice(0, count);
 }
 
 async function getActiveHomeworks(groupId, userId) {
@@ -113,20 +142,37 @@ async function getActiveHomeworks(groupId, userId) {
 }
 
 async function getProgress(userId) {
-    const snap = await db.collection('completed_tasks')
-        .where('userId', '==', userId)
-        .get();
-
     let totalScore = 0;
     let totalMax = 0;
     let count = 0;
 
-    snap.forEach(d => {
-        const data = d.data();
-        totalScore += Number(data.score || 0);
-        totalMax   += Number(data.maxScore || 0);
-        count++;
-    });
+    const batchSize = 10;
+    const batches = [];
+    for (let i = 0; i < RESULTS_COLLECTIONS.length; i += batchSize) {
+        batches.push(RESULTS_COLLECTIONS.slice(i, i + batchSize));
+    }
+
+    for (const batch of batches) {
+        const snaps = await Promise.all(
+            batch.map(col =>
+                db.collection(col).where('userId', '==', userId).get().catch(() => null)
+            )
+        );
+
+        snaps.forEach(snap => {
+            if (!snap || snap.empty) return;
+            snap.forEach(doc => {
+                const data = doc.data();
+                const score = Number(data.testResult ?? data.score ?? 0);
+                const max   = Number(data.maxScore ?? data.testQuestionsQuantity ?? 0);
+                if (max > 0) {
+                    totalScore += score;
+                    totalMax   += max;
+                    count++;
+                }
+            });
+        });
+    }
 
     const percent = totalMax > 0 ? Math.round((totalScore / totalMax) * 100) : 0;
     return { count, percent };
@@ -146,6 +192,60 @@ const MAIN_KEYBOARD = {
     resize_keyboard: true,
     one_time_keyboard: false,
 };
+
+async function handleScheduleChange(payload) {
+    const { groupId, dateStr, oldTime, newTime, changeType } = payload;
+    if (!groupId || !dateStr) return;
+
+    const groupDoc = await db.collection('groups').doc(groupId).get();
+    if (!groupDoc.exists) return;
+
+    const members = groupDoc.data().members || [];
+    if (members.length === 0) return;
+
+    const usersSnap = await db.collection('users')
+        .where(admin.firestore.FieldPath.documentId(), 'in', members.slice(0, 10))
+        .get();
+
+    const formattedDate = formatDate(dateStr);
+
+    let text = '';
+    if (changeType === 'time_change') {
+        text = `⏰ *Зміна часу заняття*\n\n📅 Дата: *${formattedDate}*\n🕐 Старий час: ${oldTime}\n🕑 Новий час: *${newTime}*\n\nПеревір свій розклад у кабінеті 👇\n${CABINET_URL}`;
+    } else if (changeType === 'rescheduled') {
+        text = `🔄 *Заняття перенесено*\n\n📅 Нова дата: *${formattedDate}*\n🕑 Час: *${newTime || oldTime}*\n\nПеревір свій розклад у кабінеті 👇\n${CABINET_URL}`;
+    } else if (changeType === 'cancelled') {
+        text = `❌ *Заняття скасовано*\n\n📅 Дата: *${formattedDate}*\n🕐 Час: ${oldTime}\n\nПеревір свій розклад у кабінеті 👇\n${CABINET_URL}`;
+    } else {
+        return;
+    }
+
+    const sends = [];
+    usersSnap.forEach(doc => {
+        const chatId = doc.data().tgChatId;
+        if (chatId) {
+            sends.push(
+                tgSend(chatId, text, { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: MAIN_KEYBOARD })
+            );
+        }
+    });
+
+    if (members.length > 10) {
+        const extraSnap = await db.collection('users')
+            .where(admin.firestore.FieldPath.documentId(), 'in', members.slice(10, 30))
+            .get();
+        extraSnap.forEach(doc => {
+            const chatId = doc.data().tgChatId;
+            if (chatId) {
+                sends.push(
+                    tgSend(chatId, text, { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: MAIN_KEYBOARD })
+                );
+            }
+        });
+    }
+
+    await Promise.allSettled(sends);
+}
 
 async function handleUpdate(update) {
     let chatId, text = '';
@@ -302,20 +402,32 @@ module.exports = async function handler(req, res) {
         return;
     }
 
-    let update;
+    let body;
     try {
-        update = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
+        body = typeof req.body === 'string' ? JSON.parse(req.body) : req.body;
     } catch (e) {
         console.error('[Parse Error]', e.message);
         res.status(200).send('OK');
         return;
     }
 
+    const action = req.query?.action || '';
+
+    if (action === 'schedule_change') {
+        try {
+            await handleScheduleChange(body);
+        } catch (e) {
+            console.error('[ScheduleChange Error]', e.message, e.stack);
+        }
+        res.status(200).send('OK');
+        return;
+    }
+
     try {
-        await handleUpdate(update);
+        await handleUpdate(body);
     } catch (e) {
         console.error('[Handler Error]', e.message, e.stack);
-        const chatId = update?.message?.chat?.id || update?.callback_query?.message?.chat?.id;
+        const chatId = body?.message?.chat?.id || body?.callback_query?.message?.chat?.id;
         if (chatId) {
             try { await tgSend(chatId, '⚠️ Сталася помилка. Спробуй ще раз.', { reply_markup: MAIN_KEYBOARD }); } catch (_) {}
         }

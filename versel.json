@@ -11,5 +11,11 @@
       "src": "/api/webhook",
       "dest": "/api/webhook.js"
     }
+  ],
+  "crons": [
+    {
+      "path": "/api/remindersCron",
+      "schedule": "0 19 * * *"
+    }
   ]
 }
