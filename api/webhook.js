@@ -32,7 +32,20 @@ async function findUserByChatId(chatId) {
         .get();
     if (snap.empty) return null;
     const doc = snap.docs[0];
-    return { uid: doc.id, ...doc.data() };
+    const userData = { uid: doc.id, ...doc.data() };
+
+    if (!userData.groupId) {
+        const groupSnap = await db.collection('groups')
+            .where('members', 'array-contains', doc.id)
+            .limit(1)
+            .get();
+        if (!groupSnap.empty) {
+            userData.groupId = groupSnap.docs[0].id;
+            await db.collection('users').doc(doc.id).set({ groupId: userData.groupId }, { merge: true });
+        }
+    }
+
+    return userData;
 }
 
 async function getNextLessons(groupId, count = 5) {
