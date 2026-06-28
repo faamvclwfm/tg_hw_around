@@ -7,31 +7,22 @@
     },
     "api/adminWebhook.js": {
       "memory": 256,
-      "maxDuration": 15
+      "maxDuration": 30
     },
     "api/remindersCron.js": {
       "memory": 256,
-      "maxDuration": 15
+      "maxDuration": 60
     }
   },
   "routes": [
-    {
-      "src": "/api/webhook",
-      "dest": "/api/webhook.js"
-    },
-    {
-      "src": "/api/adminWebhook",
-      "dest": "/api/adminWebhook.js"
-    },
-    {
-      "src": "/api/remindersCron",
-      "dest": "/api/remindersCron.js"
-    }
+    { "src": "/api/webhook", "dest": "/api/webhook.js" },
+    { "src": "/api/adminWebhook", "dest": "/api/adminWebhook.js" },
+    { "src": "/api/remindersCron", "dest": "/api/remindersCron.js" }
   ],
   "crons": [
     {
-      "path": "/api/remindersCron",
-      "schedule": "0 19 * * *"
+      "path": "/api/remindersCron?secret=REPLACE_WITH_YOUR_CRON_SECRET",
+      "schedule": "0 15 * * *"
     }
   ]
 }

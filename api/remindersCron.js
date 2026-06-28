@@ -77,6 +77,7 @@ async function sendReminders() {
     const groupsSnap = await db.collection('groups').get();
     if (groupsSnap.empty) return;
 
+    // Збираємо всіх учнів з усіх груп + перевіряємо чи є заняття завтра
     const remindersToSend = [];
 
     groupsSnap.forEach(groupDoc => {
@@ -89,7 +90,10 @@ async function sendReminders() {
 
         if (members.length === 0) return;
 
+        // Перевіряємо чи є заняття завтра
         let tomorrowLessons = [];
+        let hasLessonTomorrow = false;
+        let lessonTimeStr = '';
 
         const exception = exceptions[tomorrowStr];
         if (exception) {
@@ -105,22 +109,23 @@ async function sendReminders() {
             }
         }
 
-        if (tomorrowLessons.length === 0) return;
-
-        const timeStr = tomorrowLessons.map(l => l.time).join(', ');
+        if (tomorrowLessons.length > 0) {
+            hasLessonTomorrow = true;
+            lessonTimeStr = tomorrowLessons.map(l => l.time).join(', ');
+        }
 
         members.forEach(userId => {
-            remindersToSend.push({ groupId, userId, tomorrowStr, timeStr });
+            remindersToSend.push({ groupId, userId, tomorrowStr, hasLessonTomorrow, lessonTimeStr });
         });
     });
 
     if (remindersToSend.length === 0) {
-        console.log('[Reminders] No lessons tomorrow for any group.');
+        console.log('[Reminders] No members found.');
         return;
     }
 
+    // Завантажуємо дані юзерів батчами
     const uniqueUserIds = [...new Set(remindersToSend.map(r => r.userId))];
-
     const usersMap = {};
     const batchSize = 10;
     for (let i = 0; i < uniqueUserIds.length; i += batchSize) {
@@ -141,23 +146,41 @@ async function sendReminders() {
 
         const activeHws = await getActiveHomeworks(reminder.groupId, reminder.userId).catch(() => []);
 
-        let hwBlock = '';
-        if (activeHws.length > 0) {
+        // Відправляємо нагадування якщо: є заняття завтра АБО є невиконані ДЗ
+        if (!reminder.hasLessonTomorrow && activeHws.length === 0) continue;
+
+        let text = '';
+
+        if (reminder.hasLessonTomorrow && activeHws.length > 0) {
+            // Є і заняття і ДЗ
             const hwLines = activeHws.slice(0, 3).map((hw, i) => {
                 const count = (hw.requiredTests || []).length;
-                return `  ${i + 1}. 📌 *${hw.title || 'Без назви'}* (${count} тестів)`;
+                return `  ${i + 1}. 📌 *${hw.title || 'Без назви'}* (${count} тест${count === 1 ? '' : 'ів'})`;
             });
-            hwBlock = `\n\n📚 *Активні домашні завдання:*\n${hwLines.join('\n')}`;
-            if (activeHws.length > 3) hwBlock += `\n  ...і ще ${activeHws.length - 3}`;
-            hwBlock += `\n\n👉 [Виконати в кабінеті](${CABINET_URL})`;
+            text =
+                `🔔 *Нагадування*\n\n` +
+                `📅 Завтра заняття о *${reminder.lessonTimeStr}*\n\n` +
+                `📚 *Невиконані домашні завдання:*\n${hwLines.join('\n')}` +
+                (activeHws.length > 3 ? `\n  ...і ще ${activeHws.length - 3}` : '') +
+                `\n\n👉 [Виконати в кабінеті](${CABINET_URL})`;
+        } else if (reminder.hasLessonTomorrow && activeHws.length === 0) {
+            // Є заняття, ДЗ немає
+            text =
+                `🔔 *Нагадування*\n\n` +
+                `📅 Завтра заняття о *${reminder.lessonTimeStr}*\n\n` +
+                `✅ Всі домашні завдання виконано — молодець!`;
         } else {
-            hwBlock = '\n\n✅ Активних ДЗ немає — можна йти на заняття спокійно!';
+            // Немає заняття, але є невиконані ДЗ
+            const hwLines = activeHws.slice(0, 3).map((hw, i) => {
+                const count = (hw.requiredTests || []).length;
+                return `  ${i + 1}. 📌 *${hw.title || 'Без назви'}* (${count} тест${count === 1 ? '' : 'ів'})`;
+            });
+            text =
+                `📚 *Нагадування про домашні завдання*\n\n` +
+                `У тебе є невиконані ДЗ:\n${hwLines.join('\n')}` +
+                (activeHws.length > 3 ? `\n  ...і ще ${activeHws.length - 3}` : '') +
+                `\n\n👉 [Виконати в кабінеті](${CABINET_URL})`;
         }
-
-        const text =
-            `🔔 *Нагадування про завтрашнє заняття*\n\n` +
-            `📅 *${formatDate(reminder.tomorrowStr)}* о *${reminder.timeStr}*` +
-            hwBlock;
 
         sends.push(
             tgSend(user.tgChatId, text, {
@@ -172,7 +195,7 @@ async function sendReminders() {
 }
 
 module.exports = async function handler(req, res) {
-    const secret = req.headers['x-cron-secret'];
+    const secret = req.query?.secret || req.headers['x-cron-secret'];
     if (secret !== process.env.CRON_SECRET) {
         res.status(401).send('Unauthorized');
         return;
