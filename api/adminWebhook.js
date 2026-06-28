@@ -17,9 +17,6 @@ const GROUPS_URL = 'https://diagnostictestresults-9f6ac.web.app/groups.html';
 const CABINET_URL = 'https://diagnostictestresults-9f6ac.web.app/';
 const ADMIN_SECRET = process.env.ADMIN_SECRET || 'around_admin';
 
-// Тимчасовий стан для multi-step діалогу (в пам'яті, між запитами скидається — ок для простих флоу)
-const adminState = {};
-
 async function tgSend(chatId, text, extra = {}) {
     const r = await fetch(`https://api.telegram.org/bot${ADMIN_BOT_TOKEN}/sendMessage`, {
         method: 'POST',
@@ -31,7 +28,6 @@ async function tgSend(chatId, text, extra = {}) {
     return result;
 }
 
-// Надсилає учню через учнівський бот (BOT_TOKEN)
 async function tgSendStudent(chatId, text, extra = {}) {
     const r = await fetch(`https://api.telegram.org/bot${BOT_TOKEN}/sendMessage`, {
         method: 'POST',
@@ -43,12 +39,18 @@ async function tgSendStudent(chatId, text, extra = {}) {
     return result;
 }
 
+async function answerCallback(callbackQueryId) {
+    await fetch(`https://api.telegram.org/bot${ADMIN_BOT_TOKEN}/answerCallbackQuery`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ callback_query_id: callbackQueryId })
+    });
+}
+
 async function getAdminChatIds() {
     const snap = await db.collection('admins').get();
     const ids = [];
-    snap.forEach(doc => {
-        if (doc.data().tgChatId) ids.push(doc.data().tgChatId);
-    });
+    snap.forEach(doc => { if (doc.data().tgChatId) ids.push(doc.data().tgChatId); });
     return ids;
 }
 
@@ -135,7 +137,9 @@ async function handleActiveHw(chatId) {
         lines.push(`📌 *${hw.title || 'Без назви'}*\n   📁 ${groupCache[groupId]} | 🧪 ${(hw.requiredTests || []).length} тестів | ✅ Здали: ${completedSnap.size}`);
     }
 
-    await tgSend(chatId, `📋 *Останні 10 ДЗ:*\n\n${lines.join('\n\n')}\n\n👉 [Адмін-панель](${GROUPS_URL})`, { parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: ADMIN_KEYBOARD });
+    await tgSend(chatId, `📋 *Останні 10 ДЗ:*\n\n${lines.join('\n\n')}\n\n👉 [Адмін-панель](${GROUPS_URL})`, {
+        parse_mode: 'Markdown', disable_web_page_preview: true, reply_markup: ADMIN_KEYBOARD
+    });
 }
 
 async function handleRecentSubmissions(chatId) {
@@ -155,15 +159,20 @@ async function handleRecentSubmissions(chatId) {
             assignCache[sub.assignmentId] = aDoc.exists ? (aDoc.data().title || 'Без назви') : 'Невідоме';
         }
         const ts = sub.submittedAt?.seconds
-            ? new Date(sub.submittedAt.seconds * 1000).toLocaleString('uk-UA', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Kiev' })
+            ? new Date(sub.submittedAt.seconds * 1000).toLocaleString('uk-UA', {
+                day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Kiev'
+              })
             : '—';
         lines.push(`✅ *${sub.userEmail || 'Учень'}*\n   📌 ${assignCache[sub.assignmentId]} | 🕐 ${ts}`);
     }
 
-    await tgSend(chatId, `🔔 *Останні 10 здач:*\n\n${lines.join('\n\n')}`, { parse_mode: 'Markdown', reply_markup: ADMIN_KEYBOARD });
+    await tgSend(chatId, `🔔 *Останні 10 здач:*\n\n${lines.join('\n\n')}`, {
+        parse_mode: 'Markdown', reply_markup: ADMIN_KEYBOARD
+    });
 }
 
-// Показати список груп для вибору (для нагадування)
+// Крок 1: показати список груп
+// callback_data = "rg:GROUPID" — максимально коротко, вкладається в 64 байти
 async function handleRemindStep1(chatId) {
     const groupsSnap = await db.collection('groups').get();
     if (groupsSnap.empty) {
@@ -174,22 +183,25 @@ async function handleRemindStep1(chatId) {
     const buttons = [];
     groupsSnap.forEach(doc => {
         const name = doc.data().groupName || 'Без назви';
-        buttons.push([{ text: `📁 ${name}`, callback_data: `remind_group:${doc.id}:${name}` }]);
+        const cbData = `rg:${doc.id}`;
+        // Telegram ліміт: 64 байти на callback_data
+        if (Buffer.byteLength(cbData, 'utf8') <= 64) {
+            buttons.push([{ text: `📁 ${name}`, callback_data: cbData }]);
+        } else {
+            // Якщо groupId якось довгий — беремо перші 60 байт
+            buttons.push([{ text: `📁 ${name}`, callback_data: cbData.slice(0, 60) }]);
+        }
     });
-    buttons.push([{ text: '↩️ Скасувати', callback_data: 'remind_cancel' }]);
+    buttons.push([{ text: '↩️ Скасувати', callback_data: 'rc' }]);
 
-    adminState[chatId] = { step: 'choosing_group' };
-
-    await tgSend(chatId, '📢 *Нагадати про ДЗ*\n\nОберіть групу, якій надіслати нагадування:', {
+    await tgSend(chatId, '📢 *Нагадати про ДЗ*\n\nОберіть групу:', {
         parse_mode: 'Markdown',
         reply_markup: { inline_keyboard: buttons }
     });
 }
 
-// Розсилка нагадувань учням конкретної групи
-async function sendHwRemindersToGroup(chatId, groupId, groupName) {
-    await tgSend(chatId, `⏳ Надсилаю нагадування групі *${groupName}*...`, { parse_mode: 'Markdown' });
-
+// Крок 2: розсилка нагадувань учням групи
+async function sendHwRemindersToGroup(chatId, groupId) {
     const groupDoc = await db.collection('groups').doc(groupId).get();
     if (!groupDoc.exists) {
         await tgSend(chatId, '❌ Групу не знайдено.', { reply_markup: ADMIN_KEYBOARD });
@@ -197,14 +209,16 @@ async function sendHwRemindersToGroup(chatId, groupId, groupName) {
     }
 
     const groupData = groupDoc.data();
+    const groupName = groupData.groupName || 'Невідома';
     const members = groupData.members || [];
+
+    await tgSend(chatId, `⏳ Надсилаю нагадування групі *${groupName}*...`, { parse_mode: 'Markdown' });
 
     if (members.length === 0) {
         await tgSend(chatId, '📭 У групі немає учнів.', { reply_markup: ADMIN_KEYBOARD });
         return;
     }
 
-    // Завантажуємо всі ДЗ групи
     const assignSnap = await db.collection('assignments').where('groupId', '==', groupId).get();
     if (assignSnap.empty) {
         await tgSend(chatId, '📭 У групі немає домашніх завдань.', { reply_markup: ADMIN_KEYBOARD });
@@ -214,11 +228,10 @@ async function sendHwRemindersToGroup(chatId, groupId, groupName) {
     const allAssignments = [];
     assignSnap.forEach(d => allAssignments.push({ id: d.id, ...d.data() }));
 
-    // Завантажуємо дані юзерів батчами
+    // Завантажуємо юзерів батчами по 10
     const usersMap = {};
-    const batchSize = 10;
-    for (let i = 0; i < members.length; i += batchSize) {
-        const chunk = members.slice(i, i + batchSize);
+    for (let i = 0; i < members.length; i += 10) {
+        const chunk = members.slice(i, i + 10);
         const snap = await db.collection('users')
             .where(admin.firestore.FieldPath.documentId(), 'in', chunk)
             .get();
@@ -229,16 +242,10 @@ async function sendHwRemindersToGroup(chatId, groupId, groupName) {
     let noTgCount = 0;
     let noPendingCount = 0;
 
-    const sends = [];
-
     for (const userId of members) {
         const user = usersMap[userId];
-        if (!user || !user.tgChatId) {
-            noTgCount++;
-            continue;
-        }
+        if (!user || !user.tgChatId) { noTgCount++; continue; }
 
-        // Перевіряємо які ДЗ учень ще не здав
         const completedSnap = await db.collection('completed_homeworks')
             .where('groupId', '==', groupId)
             .where('userId', '==', userId)
@@ -247,43 +254,41 @@ async function sendHwRemindersToGroup(chatId, groupId, groupName) {
         const submittedIds = new Set();
         completedSnap.forEach(d => submittedIds.add(d.data().assignmentId));
 
-        const pendingHws = allAssignments.filter(hw => !submittedIds.has(hw.id));
-        pendingHws.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
+        const pendingHws = allAssignments
+            .filter(hw => !submittedIds.has(hw.id))
+            .sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
 
-        if (pendingHws.length === 0) {
-            noPendingCount++;
-            continue;
-        }
+        if (pendingHws.length === 0) { noPendingCount++; continue; }
 
         const hwLines = pendingHws.slice(0, 5).map((hw, i) => {
             const count = (hw.requiredTests || []).length;
             return `  ${i + 1}. 📌 *${hw.title || 'Без назви'}* (${count} тест${count === 1 ? '' : 'ів'})`;
         });
 
+        const plural = pendingHws.length === 1 ? 'е завдання' : 'іх завдань';
         const text =
             `📢 *Нагадування від вчителя*\n\n` +
-            `У тебе є ${pendingHws.length} невиконан${pendingHws.length === 1 ? 'е' : 'их'} домашн${pendingHws.length === 1 ? 'є завдання' : 'іх завдань'}:\n\n` +
+            `У тебе є ${pendingHws.length} невиконан${plural}:\n\n` +
             hwLines.join('\n') +
             (pendingHws.length > 5 ? `\n  ...і ще ${pendingHws.length - 5}` : '') +
             `\n\n👉 [Виконати в кабінеті](${CABINET_URL})`;
 
-        sends.push(
-            tgSendStudent(user.tgChatId, text, {
+        try {
+            await tgSendStudent(user.tgChatId, text, {
                 parse_mode: 'Markdown',
                 disable_web_page_preview: true
-            })
-            .then(() => { sentCount++; })
-            .catch(e => console.error(`[StudentTG] Failed for ${user.tgChatId}:`, e.message))
-        );
+            });
+            sentCount++;
+        } catch (e) {
+            console.error(`[StudentTG] Failed for ${user.tgChatId}:`, e.message);
+        }
     }
 
-    await Promise.allSettled(sends);
-
     const summary =
-        `✅ *Нагадування надіслано!*\n\n` +
+        `✅ *Готово!*\n\n` +
         `📁 Група: *${groupName}*\n` +
-        `📨 Отримали: *${sentCount}* учнів\n` +
-        (noPendingCount > 0 ? `✅ Вже виконали всі ДЗ: ${noPendingCount}\n` : '') +
+        `📨 Отримали нагадування: *${sentCount}*\n` +
+        (noPendingCount > 0 ? `✅ Вже здали всі ДЗ: ${noPendingCount}\n` : '') +
         (noTgCount > 0 ? `⚠️ Без Telegram: ${noTgCount}` : '');
 
     await tgSend(chatId, summary, { parse_mode: 'Markdown', reply_markup: ADMIN_KEYBOARD });
@@ -299,41 +304,29 @@ async function handleUpdate(update) {
         chatId = update.callback_query.message.chat.id;
         callbackData = update.callback_query.data || '';
         callbackQueryId = update.callback_query.id;
-
-        // Відповідаємо на callback щоб кнопка не "крутилась"
-        await fetch(`https://api.telegram.org/bot${ADMIN_BOT_TOKEN}/answerCallbackQuery`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ callback_query_id: callbackQueryId })
-        });
+        await answerCallback(callbackQueryId);
     } else {
         return;
     }
 
-    // Обробка callback від inline-кнопок
     if (callbackData) {
         const isAdmin = (await db.collection('admins').doc(String(chatId)).get()).exists;
         if (!isAdmin) return;
 
-        if (callbackData === 'remind_cancel') {
-            delete adminState[chatId];
+        if (callbackData === 'rc') {
             await tgSend(chatId, '↩️ Скасовано.', { reply_markup: ADMIN_KEYBOARD });
             return;
         }
 
-        if (callbackData.startsWith('remind_group:')) {
-            const parts = callbackData.split(':');
-            const groupId = parts[1];
-            const groupName = parts.slice(2).join(':');
-            delete adminState[chatId];
-            await sendHwRemindersToGroup(chatId, groupId, groupName);
+        if (callbackData.startsWith('rg:')) {
+            const groupId = callbackData.slice(3);
+            await sendHwRemindersToGroup(chatId, groupId);
             return;
         }
 
         return;
     }
 
-    // Обробка текстових повідомлень
     if (text.startsWith('/start')) {
         const secret = text.split(' ')[1];
         if (secret !== ADMIN_SECRET) {
@@ -391,7 +384,7 @@ module.exports = async function handler(req, res) {
         return;
     }
 
-    try { await handleUpdate(body); } catch (e) { console.error('[AdminHandler]', e.message); }
+    try { await handleUpdate(body); } catch (e) { console.error('[AdminHandler]', e.message, e.stack); }
 
     res.status(200).send('OK');
 };
