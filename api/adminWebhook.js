@@ -265,7 +265,7 @@ async function sendHwRemindersToGroup(chatId, groupId) {
             return `  ${i + 1}. 📌 *${hw.title || 'Без назви'}* (${count} тест${count === 1 ? '' : 'ів'})`;
         });
 
-        const plural = pendingHws.length === 1 ? 'е завдання' : 'іх завдань';
+        const plural = pendingHws.length === 1 ? 'е завдання' : 'их завдань';
         const text =
             `📢 *Нагадування від вчителя*\n\n` +
             `У тебе є ${pendingHws.length} невиконан${plural}:\n\n` +
