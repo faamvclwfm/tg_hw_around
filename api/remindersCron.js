@@ -25,21 +25,38 @@ async function tgSend(chatId, text, extra = {}) {
     return result;
 }
 
+const KYIV_TZ = 'Europe/Kyiv';
+
+// Повертає поточну годину за Києвом (0-23), незалежно від того, де фізично
+// виконується сервер (Vercel завжди працює в UTC) і незалежно від переходу
+// на літній/зимовий час — Intl сам підтягує правильний офсет для Europe/Kyiv.
+function getKyivHour(date = new Date()) {
+    const hourStr = new Intl.DateTimeFormat('en-GB', {
+        timeZone: KYIV_TZ,
+        hour: '2-digit',
+        hourCycle: 'h23'
+    }).format(date);
+    return parseInt(hourStr, 10);
+}
+
+// Формат YYYY-MM-DD за Києвом (en-CA форматує саме так)
+function formatInKyiv(date) {
+    return new Intl.DateTimeFormat('en-CA', { timeZone: KYIV_TZ }).format(date);
+}
+
 function getTomorrowDateStr() {
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const y = tomorrow.getFullYear();
-    const m = String(tomorrow.getMonth() + 1).padStart(2, '0');
-    const d = String(tomorrow.getDate()).padStart(2, '0');
-    return `${y}-${m}-${d}`;
+    return formatInKyiv(new Date(Date.now() + 24 * 60 * 60 * 1000));
+}
+
+function getDowFromDateStr(dateStr) {
+    // Парсимо як UTC-опівніч, щоб день тижня не з'їжджав через таймзону сервера
+    let dow = new Date(dateStr + 'T00:00:00Z').getUTCDay();
+    if (dow === 0) dow = 7;
+    return dow;
 }
 
 function getTomorrowDow() {
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    let dow = tomorrow.getDay();
-    if (dow === 0) dow = 7;
-    return dow;
+    return getDowFromDateStr(getTomorrowDateStr());
 }
 
 function formatDate(dateStr) {
@@ -66,6 +83,48 @@ async function getActiveHomeworks(groupId, userId) {
 
     active.sort((a, b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0));
     return active;
+}
+
+
+async function sendSubscriptionReminders(usersMap) {
+    let sentCount = 0;
+
+    for (const uid of Object.keys(usersMap)) {
+        const user = usersMap[uid];
+        if (!user || !user.tgChatId) continue;
+
+        const sub = user.subscription;
+        if (!sub) continue;
+
+        const paid = Number(sub.paid || 0);
+        const attended = Number(sub.attended || 0);
+        const left = paid - attended;
+
+        if (left !== 1) continue;
+        if (sub.lowBalanceNotified) continue;
+
+        const price = Number(sub.pricePerLesson || 0);
+        const sum = price * paid;
+        const nextPaymentStr = sub.nextPayment ? formatDate(sub.nextPayment) : 'не вказано';
+        const sumLine = price > 0 ? `\n💰 Сума до оплати: *${sum} грн*` : '';
+
+        const text =
+            `⚠️ *Абонемент майже закінчився!*\n\n` +
+            `У тебе залишилось *1 заняття* з оплаченого абонементу.` +
+            sumLine +
+            `\n📅 Оплата до: *${nextPaymentStr}*\n\n` +
+            `Зверніться до вчителя, щоб поповнити абонемент 🙌`;
+
+        try {
+            await tgSend(user.tgChatId, text, { parse_mode: 'Markdown', disable_web_page_preview: true });
+            await db.collection('users').doc(uid).update({ 'subscription.lowBalanceNotified': true });
+            sentCount++;
+        } catch (e) {
+            console.error(`[SubReminder] Failed for ${uid}:`, e.message);
+        }
+    }
+
+    console.log(`[SubReminder] Sent ${sentCount} subscription reminders.`);
 }
 
 async function sendReminders() {
@@ -138,6 +197,10 @@ async function sendReminders() {
         });
     }
 
+    // Нагадування про абонемент перевіряємо для всіх учнів, кого щойно завантажили,
+    // незалежно від того, є в них заняття завтра чи ні.
+    await sendSubscriptionReminders(usersMap).catch(e => console.error('[SubReminder] failed:', e.message));
+
     const sends = [];
 
     for (const reminder of remindersToSend) {
@@ -194,10 +257,21 @@ async function sendReminders() {
     console.log(`[Reminders] Sent ${sends.length} reminders.`);
 }
 
+// О котрій за Києвом реально надсилати нагадування
+const TARGET_KYIV_HOUR = 17;
+
 module.exports = async function handler(req, res) {
     const secret = req.query?.secret || req.headers['x-cron-secret'];
     if (secret !== process.env.CRON_SECRET) {
         res.status(401).send('Unauthorized');
+        return;
+    }
+
+    const force = req.query?.force === '1';
+    const kyivHour = getKyivHour();
+
+    if (!force && kyivHour !== TARGET_KYIV_HOUR) {
+        res.status(200).send(`Skipped: current Kyiv hour is ${kyivHour}, waiting for ${TARGET_KYIV_HOUR}:00`);
         return;
     }
 

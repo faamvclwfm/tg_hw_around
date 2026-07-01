@@ -276,10 +276,13 @@ async function handleUpdate(update) {
         const paid     = Number(sub.paid     || 0);
         const attended = Number(sub.attended || 0);
         const left     = Math.max(0, paid - attended);
-        const next     = sub.nextPayment || 'не вказано';
+        const next     = sub.nextPayment ? formatDate(sub.nextPayment) : 'не вказано';
+        const price    = Number(sub.pricePerLesson || 0);
+        const sum      = price * paid;
+        const priceLine = price > 0 ? `\n💰 Сума абонементу: \`${sum} грн\`` : '';
         const warning  = left === 0 ? '\n\n⚠️ *Поповни абонемент!*' : left <= 2 ? `\n\n⚡ Залишилось лише ${left} — скоро поповнити.` : '';
 
-        await tgSend(chatId, `💳 *АБОНЕМЕНТ*\n\n👤 ${name}\n▬▬▬▬▬▬▬▬▬▬\n🍏 Оплачено:   \`${paid}\`\n👟 Відвідано:  \`${attended}\`\n🔥 Залишилось: \`${left}\`\n▬▬▬▬▬▬▬▬▬▬\n📅 Наступна оплата: *${next}*` + warning, { parse_mode: 'Markdown', reply_markup: MAIN_KEYBOARD });
+        await tgSend(chatId, `💳 *АБОНЕМЕНТ*\n\n👤 ${name}\n▬▬▬▬▬▬▬▬▬▬\n🍏 Оплачено:   \`${paid}\`\n👟 Відвідано:  \`${attended}\`\n🔥 Залишилось: \`${left}\`${priceLine}\n▬▬▬▬▬▬▬▬▬▬\n📅 Наступна оплата: *${next}*` + warning, { parse_mode: 'Markdown', reply_markup: MAIN_KEYBOARD });
         return;
     }
 
